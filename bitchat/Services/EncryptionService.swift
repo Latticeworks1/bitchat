@@ -39,16 +39,60 @@ class EncryptionService {
         self.signingPrivateKey = Curve25519.Signing.PrivateKey()
         self.signingPublicKey = signingPrivateKey.publicKey
         
-        // Load or create persistent identity key
-        if let identityData = UserDefaults.standard.data(forKey: "bitchat.identityKey"),
-           let loadedKey = try? Curve25519.Signing.PrivateKey(rawRepresentation: identityData) {
-            self.identityKey = loadedKey
-        } else {
-            // First run - create and save identity key
-            self.identityKey = Curve25519.Signing.PrivateKey()
-            UserDefaults.standard.set(identityKey.rawRepresentation, forKey: "bitchat.identityKey")
+        // Load or create persistent identity key from Keychain
+        let keychainManager = KeychainManager.shared
+        let identityKeyAccount = KeychainManager.identityKeyAccount
+        let identityKeyService = KeychainManager.identityKeyService
+        let userDefaultsKey = "bitchat.identityKey" // Old UserDefaults key
+
+        var loadedIdentityKey: Curve25519.Signing.PrivateKey?
+
+        // 1. Try to load from Keychain
+        if let keyDataFromKeychain = keychainManager.retrieveData(forKey: identityKeyAccount, forService: identityKeyService) {
+            if let key = try? Curve25519.Signing.PrivateKey(rawRepresentation: keyDataFromKeychain) {
+                loadedIdentityKey = key
+                // print("[CRYPTO] Loaded identity key from Keychain.")
+            } else {
+                // print("[CRYPTO] Failed to initialize key from Keychain data. Data might be corrupted.")
+                // Attempt to delete corrupted key from Keychain
+                _ = keychainManager.delete(forKey: identityKeyAccount, forService: identityKeyService)
+            }
         }
-        self.identityPublicKey = identityKey.publicKey
+
+        // 2. If not in Keychain, try to migrate from UserDefaults (one-time)
+        if loadedIdentityKey == nil, let keyDataFromUserDefaults = UserDefaults.standard.data(forKey: userDefaultsKey) {
+            if let key = try? Curve25519.Signing.PrivateKey(rawRepresentation: keyDataFromUserDefaults) {
+                // print("[CRYPTO] Migrating identity key from UserDefaults to Keychain.")
+                if keychainManager.saveData(key.rawRepresentation, forKey: identityKeyAccount, forService: identityKeyService) {
+                    loadedIdentityKey = key
+                    UserDefaults.standard.removeObject(forKey: userDefaultsKey) // Remove from UserDefaults after successful migration
+                    // print("[CRYPTO] Successfully migrated key to Keychain and removed from UserDefaults.")
+                } else {
+                    // print("[CRYPTO] Failed to save migrated key to Keychain. Key will remain in UserDefaults for this session.")
+                    loadedIdentityKey = key // Use it for this session, but it's not secured in Keychain yet
+                }
+            } else {
+                // print("[CRYPTO] Failed to initialize key from UserDefaults data. Removing corrupted data.")
+                UserDefaults.standard.removeObject(forKey: userDefaultsKey)
+            }
+        }
+
+        // 3. If still no key, generate a new one and save to Keychain
+        if let finalKey = loadedIdentityKey {
+            self.identityKey = finalKey
+        } else {
+            // print("[CRYPTO] No existing key found or migration failed. Generating new identity key.")
+            let newKey = Curve25519.Signing.PrivateKey()
+            if keychainManager.saveData(newKey.rawRepresentation, forKey: identityKeyAccount, forService: identityKeyService) {
+                self.identityKey = newKey
+                // print("[CRYPTO] Successfully generated and saved new identity key to Keychain.")
+            } else {
+                // print("[CRYPTO] CRITICAL: Failed to save new identity key to Keychain. Using ephemeral key for this session.")
+                // This is a fallback, ideally should not happen. The app will lose its persistent identity if Keychain fails.
+                self.identityKey = Curve25519.Signing.PrivateKey() // Use an in-memory key for this session
+            }
+        }
+        self.identityPublicKey = self.identityKey.publicKey
     }
     
     // Create combined public key data for exchange
@@ -110,8 +154,22 @@ class EncryptionService {
     
     // Clear persistent identity (for panic mode)
     func clearPersistentIdentity() {
-        UserDefaults.standard.removeObject(forKey: "bitchat.identityKey")
-        // print("[CRYPTO] Cleared persistent identity key")
+        let keychainManager = KeychainManager.shared
+        let identityKeyAccount = KeychainManager.identityKeyAccount
+        let identityKeyService = KeychainManager.identityKeyService
+        let userDefaultsKey = "bitchat.identityKey" // Old UserDefaults key
+
+        // Delete from Keychain
+        let keychainSuccess = keychainManager.delete(forKey: identityKeyAccount, forService: identityKeyService)
+        // if keychainSuccess {
+        //     print("[CRYPTO] Successfully cleared persistent identity key from Keychain.")
+        // } else {
+        //     print("[CRYPTO] Failed to clear persistent identity key from Keychain (it might not have existed).")
+        // }
+
+        // Also ensure it's removed from UserDefaults (in case migration hadn't completed or for older versions)
+        UserDefaults.standard.removeObject(forKey: userDefaultsKey)
+        // print("[CRYPTO] Ensured persistent identity key is also cleared from UserDefaults.")
     }
     
     func encrypt(_ data: Data, for peerID: String) throws -> Data {

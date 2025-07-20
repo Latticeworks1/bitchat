@@ -16,10 +16,6 @@ struct BitchatApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     #endif
     
-    init() {
-        UNUserNotificationCenter.current().delegate = NotificationDelegate.shared
-    }
-    
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -38,6 +34,8 @@ struct BitchatApp: App {
 #if os(iOS)
 class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
+        // Set the notification delegate here, where the app environment is fully configured.
+        UNUserNotificationCenter.current().delegate = NotificationDelegate.shared
         return true
     }
 }

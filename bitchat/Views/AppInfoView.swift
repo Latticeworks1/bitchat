@@ -139,6 +139,16 @@ struct AppInfoView: View {
                         .font(.system(size: 14, design: .monospaced))
                         .foregroundColor(textColor)
                     }
+
+                    // Utilities Section for Scanner
+                    VStack(alignment: .leading, spacing: 16) {
+                        SectionHeader("Utilities")
+
+                        NavigationLink(destination: DeviceScannerView()) {
+                            FeatureRow(icon: "magnifyingglass", title: "BLE Device Scanner",
+                                      description: "Scan for all nearby Bluetooth LE devices and view their signal strength.")
+                        }
+                    }
                     
                     // Version
                     HStack {
@@ -266,6 +276,17 @@ struct AppInfoView: View {
                         .foregroundColor(textColor)
                     }
                     
+                    // Utilities Section for Scanner
+                    VStack(alignment: .leading, spacing: 16) {
+                        SectionHeader("Utilities")
+
+                        NavigationLink(destination: DeviceScannerView()) {
+                            FeatureRow(icon: "magnifyingglass", title: "BLE Device Scanner",
+                                      description: "Scan for all nearby Bluetooth LE devices and view their signal strength.")
+                        }
+                        .buttonStyle(PlainButtonStyle()) // To make the whole row tappable
+                    }
+
                     // Version
                     HStack {
                         Spacer()

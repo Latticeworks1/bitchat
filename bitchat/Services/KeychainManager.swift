@@ -12,35 +12,42 @@ import Security
 class KeychainManager {
     static let shared = KeychainManager()
     
-    private let service = "com.bitchat.passwords"
+    // Default service name for channel passwords
+    private let defaultPasswordService = "com.bitchat.passwords"
+    // Service name for identity keys
+    static let identityKeyService = "com.bitchat.identitykey" // Made static for EncryptionService to use
+    // Account name for the identity key (typically only one per app)
+    static let identityKeyAccount = "bitchat.persistentIdentityPrivateKey" // Made static
+
     private let accessGroup: String? = nil // Set this if using app groups
     
     private init() {}
     
-    // MARK: - Channel Passwords
+    // MARK: - Channel Passwords (using default service)
     
     func saveChannelPassword(_ password: String, for channel: String) -> Bool {
-        let key = "channel_\(channel)"
-        return save(password, forKey: key)
+        let key = "channel_\(channel)" // This 'key' is kSecAttrAccount
+        guard let data = password.data(using: .utf8) else { return false }
+        return saveData(data, forKey: key, forService: defaultPasswordService)
     }
     
     func getChannelPassword(for channel: String) -> String? {
         let key = "channel_\(channel)"
-        return retrieve(forKey: key)
+        guard let data = retrieveData(forKey: key, forService: defaultPasswordService) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
     
     func deleteChannelPassword(for channel: String) -> Bool {
         let key = "channel_\(channel)"
-        return delete(forKey: key)
+        return delete(forKey: key, forService: defaultPasswordService)
     }
     
     func getAllChannelPasswords() -> [String: String] {
         var passwords: [String: String] = [:]
         
-        // Query all items
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
+            kSecAttrService as String: defaultPasswordService, // Use default service
             kSecMatchLimit as String: kSecMatchLimitAll,
             kSecReturnAttributes as String: true,
             kSecReturnData as String: true
@@ -64,65 +71,40 @@ class KeychainManager {
                 }
             }
         }
-        
         return passwords
     }
+
+    // MARK: - Generic Operations (Now public to be used by EncryptionService)
     
-    // MARK: - Identity Keys
-    
-    func saveIdentityKey(_ keyData: Data, forKey key: String) -> Bool {
-        return saveData(keyData, forKey: "identity_\(key)")
-    }
-    
-    func getIdentityKey(forKey key: String) -> Data? {
-        return retrieveData(forKey: "identity_\(key)")
-    }
-    
-    // MARK: - Generic Operations
-    
-    private func save(_ value: String, forKey key: String) -> Bool {
-        guard let data = value.data(using: .utf8) else { return false }
-        return saveData(data, forKey: key)
-    }
-    
-    private func saveData(_ data: Data, forKey key: String) -> Bool {
-        // First try to update existing
-        let updateQuery: [String: Any] = [
+    // Saves data for a given key (kSecAttrAccount) and service (kSecAttrService)
+    // Uses kSecAttrAccessibleWhenUnlockedThisDeviceOnly by default and disables iCloud sync.
+    public func saveData(_ data: Data, forKey key: String, forService service: String, accessible: CFString = kSecAttrAccessibleWhenUnlockedThisDeviceOnly) -> Bool {
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: key
         ]
-        
-        var mutableUpdateQuery = updateQuery
         if let accessGroup = accessGroup {
-            mutableUpdateQuery[kSecAttrAccessGroup as String] = accessGroup
+            query[kSecAttrAccessGroup as String] = accessGroup
         }
-        
-        let updateAttributes: [String: Any] = [
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        ]
-        
-        var status = SecItemUpdate(mutableUpdateQuery as CFDictionary, updateAttributes as CFDictionary)
+
+        // Try to update first. If item doesn't exist, SecItemUpdate returns errSecItemNotFound.
+        let attributesToUpdate: [String: Any] = [kSecValueData as String: data]
+        var status = SecItemUpdate(query as CFDictionary, attributesToUpdate as CFDictionary)
         
         if status == errSecItemNotFound {
-            // Item doesn't exist, create it
-            var createQuery = mutableUpdateQuery
-            createQuery[kSecValueData as String] = data
-            createQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-            
-            status = SecItemAdd(createQuery as CFDictionary, nil)
+            // Item not found, so add it.
+            query[kSecValueData as String] = data
+            query[kSecAttrAccessible as String] = accessible // Set accessibility constraint
+            query[kSecAttrSynchronizable as String] = kCFBooleanFalse // Do not sync with iCloud Keychain
+            status = SecItemAdd(query as CFDictionary, nil)
         }
         
         return status == errSecSuccess
     }
     
-    private func retrieve(forKey key: String) -> String? {
-        guard let data = retrieveData(forKey: key) else { return nil }
-        return String(data: data, encoding: .utf8)
-    }
-    
-    private func retrieveData(forKey key: String) -> Data? {
+    // Retrieves data for a given key (kSecAttrAccount) and service (kSecAttrService)
+    public func retrieveData(forKey key: String, forService service: String) -> Data? {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -130,44 +112,42 @@ class KeychainManager {
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
-        
         if let accessGroup = accessGroup {
             query[kSecAttrAccessGroup as String] = accessGroup
         }
         
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        var dataTypeRef: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
         
-        if status == errSecSuccess, let data = result as? Data {
-            return data
+        if status == errSecSuccess {
+            return dataTypeRef as? Data
         }
-        
         return nil
     }
     
-    private func delete(forKey key: String) -> Bool {
-        var query: [String: Any] = [
+    // Deletes data for a given key (kSecAttrAccount) and service (kSecAttrService)
+    public func delete(forKey key: String, forService service: String) -> Bool {
+        let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: key
         ]
-        
-        if let accessGroup = accessGroup {
-            query[kSecAttrAccessGroup as String] = accessGroup
-        }
-        
+        // No need to add accessGroup to delete query if it wasn't part of the item's identity,
+        // but if it was, it should be included for specificity.
+        // However, standard practice is to identify by service & account primarily.
+
         let status = SecItemDelete(query as CFDictionary)
-        return status == errSecSuccess || status == errSecItemNotFound
+        return status == errSecSuccess || status == errSecItemNotFound // Consider not found also a success for deletion
     }
     
     // MARK: - Cleanup
     
+    // Deletes all channel passwords (items under the defaultPasswordService)
     func deleteAllPasswords() -> Bool {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service
+            kSecAttrService as String: defaultPasswordService // Specifically target channel passwords
         ]
-        
         if let accessGroup = accessGroup {
             query[kSecAttrAccessGroup as String] = accessGroup
         }
@@ -175,4 +155,7 @@ class KeychainManager {
         let status = SecItemDelete(query as CFDictionary)
         return status == errSecSuccess || status == errSecItemNotFound
     }
+
+    // It might be useful to have a deleteAllDataForService method if needed in future
+    // func deleteAllData(forService service: String) -> Bool { ... }
 }

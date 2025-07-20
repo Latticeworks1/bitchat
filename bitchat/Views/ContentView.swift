@@ -41,6 +41,10 @@ struct ContentView: View {
     
     var body: some View {
         ZStack {
+            UniversalGlobeView()
+                .edgesIgnoringSafeArea(.all)
+                .opacity(colorScheme == .dark ? 0.3 : 0.15)
+
             // Main content
             GeometryReader { geometry in
                 ZStack {
@@ -51,7 +55,7 @@ struct ContentView: View {
                         Divider()
                         inputView
                     }
-                    .background(backgroundColor)
+                    .background(backgroundColor.opacity(0.85)) // Make background slightly transparent
                     .foregroundColor(textColor)
                     .gesture(
                         DragGesture()

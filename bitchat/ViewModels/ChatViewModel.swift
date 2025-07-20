@@ -64,15 +64,21 @@ class ChatViewModel: ObservableObject {
     private let blockedUsersKey = "bitchat.blockedUsers"
     private var nicknameSaveTimer: Timer?
     
-    @Published var favoritePeers: Set<String> = []  // Now stores public key fingerprints instead of peer IDs
-    private var peerIDToPublicKeyFingerprint: [String: String] = [:]  // Maps ephemeral peer IDs to persistent fingerprints
-    private var blockedUsers: Set<String> = []  // Stores public key fingerprints of blocked users
+    @Published var favoritePeers: Set<String> = []  // Stores identity public key fingerprints
+    private var peerIDToPublicKeyFingerprint: [String: String] = [:]  // Maps ephemeral peer IDs to a general fingerprint (can be based on combined key if needed elsewhere)
+    private var peerIDToIdentityFingerprint: [String: String] = [:] // Maps ephemeral peer IDs to identity key fingerprints
+    private var blockedUsers: Set<String> = []  // Stores public key fingerprints of blocked users (can remain based on identity fingerprint)
     
     // Messages are naturally ephemeral - no persistent storage
     
     // Delivery tracking
     private var deliveryTrackerCancellable: AnyCancellable?
-    
+    private var scannerCancellable: AnyCancellable?
+
+    // Bluetooth scanner for nearby devices
+    private let bluetoothScannerService = BluetoothScannerService()
+    @Published var nearbyBluetoothDevices: [DiscoveredDevice] = []
+
     init() {
         loadNickname()
         loadFavorites()
@@ -99,6 +105,13 @@ class ChatViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] (messageID, status) in
                 self?.updateMessageDeliveryStatus(messageID, status: status)
+            }
+
+        // Subscribe to scanner updates
+        scannerCancellable = bluetoothScannerService.$discoveredDevices
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] devices in
+                self?.nearbyBluetoothDevices = devices
             }
         
         // Show welcome message after delay if still no peers
@@ -775,56 +788,90 @@ class ChatViewModel: ObservableObject {
     }
     
     func toggleFavorite(peerID: String) {
-        // Use public key fingerprints for persistent favorites
-        guard let fingerprint = peerIDToPublicKeyFingerprint[peerID] else {
-            // print("[FAVORITES] No public key fingerprint for peer \(peerID)")
+        // Use identity public key fingerprints for persistent favorites
+        guard let identityFingerprint = peerIDToIdentityFingerprint[peerID] else {
+            // print("[FAVORITES] No identity fingerprint for peer \(peerID) to toggle favorite.")
             return
         }
         
-        if favoritePeers.contains(fingerprint) {
-            favoritePeers.remove(fingerprint)
+        if favoritePeers.contains(identityFingerprint) {
+            favoritePeers.remove(identityFingerprint)
         } else {
-            favoritePeers.insert(fingerprint)
+            favoritePeers.insert(identityFingerprint)
         }
         saveFavorites()
         
-        // print("[FAVORITES] Toggled favorite for fingerprint: \(fingerprint)")
+        // print("[FAVORITES] Toggled favorite for identity fingerprint: \(identityFingerprint)")
     }
     
     func isFavorite(peerID: String) -> Bool {
-        guard let fingerprint = peerIDToPublicKeyFingerprint[peerID] else {
+        guard let identityFingerprint = peerIDToIdentityFingerprint[peerID] else {
+            // print("[FAVORITES] No identity fingerprint for peer \(peerID) to check favorite status.")
             return false
         }
-        return favoritePeers.contains(fingerprint)
+        return favoritePeers.contains(identityFingerprint)
     }
     
-    // Called when we receive a peer's public key
+    // Called when we receive a peer's public key (this is the combined public key data)
     func registerPeerPublicKey(peerID: String, publicKeyData: Data) {
-        // Create a fingerprint from the public key
-        let fingerprint = SHA256.hash(data: publicKeyData)
+        // publicKeyData is 96 bytes:
+        // bytes 0..<32: key agreement public key
+        // bytes 32..<64: signing public key (ephemeral)
+        // bytes 64..<96: identity public key (persistent)
+
+        // Ensure publicKeyData has the expected length
+        guard publicKeyData.count == 96 else {
+            // print("[CRYPTO_VM] Invalid combined public key data size: \(publicKeyData.count), expected 96 for peer \(peerID)")
+            return
+        }
+
+        // Extract the identity public key part (last 32 bytes)
+        let identityKeyData = publicKeyData.subdata(in: 64..<96)
+
+        // Create a fingerprint from the identity public key
+        let identityFingerprint = SHA256.hash(data: identityKeyData)
             .compactMap { String(format: "%02x", $0) }
             .joined()
-            .prefix(16)  // Use first 16 chars for brevity
+            .prefix(16) // Use first 16 chars for brevity
             .lowercased()
         
-        let fingerprintStr = String(fingerprint)
+        let identityFingerprintStr = String(identityFingerprint)
         
-        // Only register if not already registered
-        if peerIDToPublicKeyFingerprint[peerID] != fingerprintStr {
-            peerIDToPublicKeyFingerprint[peerID] = fingerprintStr
-            // print("[FAVORITES] Registered fingerprint \(fingerprint) for peer \(peerID)")
+        // Store the mapping from peerID to this identity fingerprint
+        if peerIDToIdentityFingerprint[peerID] != identityFingerprintStr {
+            peerIDToIdentityFingerprint[peerID] = identityFingerprintStr
+            // print("[FAVORITES] Registered identity fingerprint \(identityFingerprintStr) for peer \(peerID)")
+        }
+
+        // For general peer identification (e.g. blocking, or if a combined fingerprint is needed elsewhere),
+        // we can still use the full publicKeyData or a specific part of it.
+        // For blocking, it's better to also use the identityFingerprint.
+        // The existing peerIDToPublicKeyFingerprint can be repurposed or removed if not needed.
+        // For now, let's assume it might be used for something else or for a general, non-favorite fingerprint.
+        let combinedKeyFingerprint = SHA256.hash(data: publicKeyData)
+            .compactMap { String(format: "%02x", $0) }
+            .joined()
+            .prefix(16)
+            .lowercased()
+        let combinedKeyFingerprintStr = String(combinedKeyFingerprint)
+        if peerIDToPublicKeyFingerprint[peerID] != combinedKeyFingerprintStr {
+             peerIDToPublicKeyFingerprint[peerID] = combinedKeyFingerprintStr
+             // print("[FAVORITES] Registered combined key fingerprint \(combinedKeyFingerprintStr) for peer \(peerID)")
         }
     }
     
     private func isPeerBlocked(_ peerID: String) -> Bool {
-        // Check if we have the public key fingerprint for this peer
-        if let fingerprint = peerIDToPublicKeyFingerprint[peerID] {
-            return blockedUsers.contains(fingerprint)
+        // Block based on identity fingerprint for consistency and persistence
+        if let identityFingerprint = peerIDToIdentityFingerprint[peerID] {
+            return blockedUsers.contains(identityFingerprint)
         }
         
-        // Try to get public key from mesh service
-        if let publicKeyData = meshService.getPeerPublicKey(peerID) {
-            let fingerprint = SHA256.hash(data: publicKeyData)
+        // Fallback: If identity fingerprint isn't yet available for this peerID (e.g., old data or race condition),
+        // try to get the public key from meshService and calculate its identity fingerprint.
+        // This part assumes meshService.getPeerPublicKey(peerID) returns the combined key.
+        if let combinedPublicKeyData = meshService.getPeerPublicKey(peerID), combinedPublicKeyData.count == 96 {
+            let identityKeyData = combinedPublicKeyData.subdata(in: 64..<96)
+            let fingerprint = SHA256.hash(data: identityKeyData)
                 .compactMap { String(format: "%02x", $0) }
                 .joined()
                 .prefix(16)
@@ -832,7 +879,8 @@ class ChatViewModel: ObservableObject {
             return blockedUsers.contains(String(fingerprint))
         }
         
-        return false
+        // print("[BLOCKING] Could not determine identity fingerprint for peer \(peerID) for blocking check.")
+        return false // Default to not blocked if identity cannot be verified
     }
     
     func sendMessage(_ content: String) {
@@ -1283,8 +1331,16 @@ class ChatViewModel: ObservableObject {
         objectWillChange.send()
         
     }
+
+    // MARK: - Bluetooth Scanner Controls
     
+    func startDeviceScan() {
+        bluetoothScannerService.startScanning()
+    }
     
+    func stopDeviceScan() {
+        bluetoothScannerService.stopScanning()
+    }
     
     func formatTimestamp(_ date: Date) -> String {
         let formatter = DateFormatter()
