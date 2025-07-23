@@ -1360,712 +1360,717 @@ class BluetoothMeshService: NSObject {
     
     private func handleReceivedPacket(_ packet: BitchatPacket, from peerID: String, peripheral: CBPeripheral? = nil) {
         messageQueue.async(flags: .barrier) { [weak self] in
-            guard let self = self else { return }
-            guard packet.ttl > 0 else { 
-                return 
-            }
-            
-            // Validate packet has payload
-            guard !packet.payload.isEmpty else {
-                return
-            }
-            
-            // Update last seen timestamp for this peer
-            if let senderID = String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8),
-               senderID != "unknown" && senderID != self.myPeerID {
-                peerLastSeenTimestamps[senderID] = Date()
-            }
-            
-            // Replay attack protection: Check timestamp is within reasonable window (5 minutes)
-            let currentTime = UInt64(Date().timeIntervalSince1970 * 1000) // milliseconds
-            let timeDiff = abs(Int64(currentTime) - Int64(packet.timestamp))
-            if timeDiff > 300000 { // 5 minutes in milliseconds
-                // print("[SECURITY] Dropping packet from \(peerID) type:\(packet.type) - timestamp diff: \(timeDiff/1000)s (packet:\(packet.timestamp) vs current:\(currentTime))")
-                return
-            }
-        
-        // For fragments, include packet type in messageID to avoid dropping CONTINUE/END fragments
-        let messageID: String
-        if packet.type == MessageType.fragmentStart.rawValue || 
-           packet.type == MessageType.fragmentContinue.rawValue || 
-           packet.type == MessageType.fragmentEnd.rawValue {
-            // Include both type and payload hash for fragments to ensure uniqueness
-            messageID = "\(packet.timestamp)-\(String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8) ?? "")-\(packet.type)-\(packet.payload.hashValue)"
-        } else {
-            // Include payload hash for absolute uniqueness (handles same-second messages)
-            messageID = "\(packet.timestamp)-\(String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8) ?? "")-\(packet.payload.prefix(64).hashValue)"
-        }
-        
-        // Use bloom filter for efficient duplicate detection
-        if messageBloomFilter.contains(messageID) {
-            // Also check exact set for accuracy (bloom filter can have false positives)
-            if processedMessages.contains(messageID) {
-                return
-            } else {
-                // False positive from Bloom filter
-                print("[BloomFilter] False positive detected for message: \(messageID)")
-            }
-        }
-        
-        messageBloomFilter.insert(messageID)
-        processedMessages.insert(messageID)
-        
-        // Log statistics periodically
-        if messageBloomFilter.insertCount % 100 == 0 {
-            let fpRate = messageBloomFilter.estimatedFalsePositiveRate
-            print("[BloomFilter] Items: \(messageBloomFilter.insertCount), Est. FP rate: \(String(format: "%.3f%%", fpRate * 100))")
-        }
-        
-        // Reset bloom filter periodically to prevent saturation
-        if processedMessages.count > 1000 {
-            processedMessages.removeAll()
-            messageBloomFilter.reset()
-        }
-        
-        // let _ = String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8) ?? "unknown"
-        
-        
-        // Note: We'll decode messages in the switch statement below, not here
-        
-        switch MessageType(rawValue: packet.type) {
-        case .message:
-            // Unified message handler for both broadcast and private messages
-            guard let senderID = String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8) else {
-                return
-            }
-            
-            // Ignore our own messages
-            if senderID == myPeerID {
-                return
-            }
-            
-            // Check if this is a broadcast or private message
-            if let recipientID = packet.recipientID {
-                if recipientID == SpecialRecipients.broadcast {
-                    // BROADCAST MESSAGE
+            do {
+                guard let self = self else { return }
+                guard packet.ttl > 0 else {
+                    return
+                }
+
+                // Validate packet has payload
+                guard !packet.payload.isEmpty else {
+                    return
+                }
+
+                // Update last seen timestamp for this peer
+                if let senderID = String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8),
+                   senderID != "unknown" && senderID != self.myPeerID {
+                    peerLastSeenTimestamps[senderID] = Date()
+                }
+
+                // Replay attack protection: Check timestamp is within reasonable window (5 minutes)
+                let currentTime = UInt64(Date().timeIntervalSince1970 * 1000) // milliseconds
+                let timeDiff = abs(Int64(currentTime) - Int64(packet.timestamp))
+                if timeDiff > 300000 { // 5 minutes in milliseconds
+                    // print("[SECURITY] Dropping packet from \(peerID) type:\(packet.type) - timestamp diff: \(timeDiff/1000)s (packet:\(packet.timestamp) vs current:\(currentTime))")
+                    return
+                }
+
+                // For fragments, include packet type in messageID to avoid dropping CONTINUE/END fragments
+                let messageID: String
+                if packet.type == MessageType.fragmentStart.rawValue ||
+                    packet.type == MessageType.fragmentContinue.rawValue ||
+                    packet.type == MessageType.fragmentEnd.rawValue {
+                    // Include both type and payload hash for fragments to ensure uniqueness
+                    messageID = "\(packet.timestamp)-\(String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8) ?? "")-\(packet.type)-\(packet.payload.hashValue)"
+                } else {
+                    // Include payload hash for absolute uniqueness (handles same-second messages)
+                    messageID = "\(packet.timestamp)-\(String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8) ?? "")-\(packet.payload.prefix(64).hashValue)"
+                }
+
+                // Use bloom filter for efficient duplicate detection
+                if messageBloomFilter.contains(messageID) {
+                    // Also check exact set for accuracy (bloom filter can have false positives)
+                    if processedMessages.contains(messageID) {
+                        return
+                    } else {
+                        // False positive from Bloom filter
+                        print("[BloomFilter] False positive detected for message: \(messageID)")
+                    }
+                }
+
+                messageBloomFilter.insert(messageID)
+                processedMessages.insert(messageID)
+
+                // Log statistics periodically
+                if messageBloomFilter.insertCount % 100 == 0 {
+                    let fpRate = messageBloomFilter.estimatedFalsePositiveRate
+                    print("[BloomFilter] Items: \(messageBloomFilter.insertCount), Est. FP rate: \(String(format: "%.3f%%", fpRate * 100))")
+                }
+
+                // Reset bloom filter periodically to prevent saturation
+                if processedMessages.count > 1000 {
+                    processedMessages.removeAll()
+                    messageBloomFilter.reset()
+                }
+
+                // let _ = String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8) ?? "unknown"
+
+
+                // Note: We'll decode messages in the switch statement below, not here
+
+                switch MessageType(rawValue: packet.type) {
+                case .message:
+                    // Unified message handler for both broadcast and private messages
+                    guard let senderID = String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8) else {
+                        return
+                    }
                     
-                    // Verify signature if present
-                    if let signature = packet.signature {
-                        do {
-                            let isValid = try encryptionService.verify(signature, for: packet.payload, from: senderID)
-                            if !isValid {
+                    // Ignore our own messages
+                    if senderID == myPeerID {
+                        return
+                    }
+                    
+                    // Check if this is a broadcast or private message
+                    if let recipientID = packet.recipientID {
+                        if recipientID == SpecialRecipients.broadcast {
+                            // BROADCAST MESSAGE
+                            
+                            // Verify signature if present
+                            if let signature = packet.signature {
+                                do {
+                                    let isValid = try encryptionService.verify(signature, for: packet.payload, from: senderID)
+                                    if !isValid {
+                                        return
+                                    }
+                                } catch {
+                                    if !loggedCryptoErrors.contains(senderID) {
+                                        // print("[CRYPTO] Failed to verify signature from \(senderID): \(error)")
+                                        loggedCryptoErrors.insert(senderID)
+                                    }
+                                }
+                            }
+
+                            // Parse broadcast message (not encrypted)
+                            if let message = BitchatMessage.fromBinaryPayload(packet.payload) {
+
+                                // Store nickname mapping
+                                peerNicknamesLock.lock()
+                                peerNicknames[senderID] = message.sender
+                                peerNicknamesLock.unlock()
+
+                                // Handle encrypted channel messages
+                                var finalContent = message.content
+                                if message.isEncrypted, let channel = message.channel, let encryptedData = message.encryptedContent {
+                                    // Try to decrypt the content
+                                    if let decryptedContent = self.delegate?.decryptChannelMessage(encryptedData, channel: channel) {
+                                        finalContent = decryptedContent
+                                    } else {
+                                        // Unable to decrypt - show placeholder
+                                        finalContent = "[Encrypted message - password required]"
+                                    }
+                                }
+
+                                let messageWithPeerID = BitchatMessage(
+                                    id: message.id,  // Preserve the original message ID
+                                    sender: message.sender,
+                                    content: finalContent,
+                                    timestamp: message.timestamp,
+                                    isRelay: message.isRelay,
+                                    originalSender: message.originalSender,
+                                    isPrivate: false,
+                                    recipientNickname: nil,
+                                    senderPeerID: senderID,
+                                    mentions: message.mentions,
+                                    channel: message.channel,
+                                    encryptedContent: message.encryptedContent,
+                                    isEncrypted: message.isEncrypted
+                                )
+
+                                // Track last message time from this peer
+                                if let peerID = String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8) {
+                                    self.lastMessageFromPeer[peerID] = Date()
+                                }
+
+                                DispatchQueue.main.async {
+                                    self.delegate?.didReceiveMessage(messageWithPeerID)
+                                }
+
+                                // Generate and send ACK for channel messages if we're mentioned or it's a small channel
+                                let viewModel = self.delegate as? ChatViewModel
+                                let myNickname = viewModel?.nickname ?? self.myPeerID
+                                if let _ = message.channel,
+                                   let mentions = message.mentions,
+                                   (mentions.contains(myNickname) || self.activePeers.count < 10) {
+                                    if let ack = DeliveryTracker.shared.generateAck(
+                                        for: messageWithPeerID,
+                                        myPeerID: self.myPeerID,
+                                        myNickname: myNickname,
+                                        hopCount: UInt8(self.maxTTL - packet.ttl)
+                                    ) {
+                                        self.sendDeliveryAck(ack, to: senderID)
+                                    }
+                                }
+                            }
+
+                            // Relay broadcast messages
+                            var relayPacket = packet
+                            relayPacket.ttl -= 1
+                            if relayPacket.ttl > 0 {
+                                // Probabilistic flooding with smart relay decisions
+                                let relayProb = self.adaptiveRelayProbability
+
+                                // Always relay if TTL is high (fresh messages need to spread)
+                                // or if we have few peers (ensure coverage in sparse networks)
+                                let shouldRelay = relayPacket.ttl >= 4 ||
+                                self.activePeers.count <= 3 ||
+                                Double.random(in: 0...1) < relayProb
+
+                                if shouldRelay {
+                                    // Add random delay to prevent collision storms
+                                    let delay = Double.random(in: minMessageDelay...maxMessageDelay)
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                                        self?.broadcastPacket(relayPacket)
+                                    }
+                                }
+                            }
+
+                        } else if let recipientIDString = String(data: recipientID.trimmingNullBytes(), encoding: .utf8),
+                                  recipientIDString == myPeerID {
+                            // PRIVATE MESSAGE FOR US
+
+                            // Verify signature if present
+                            if let signature = packet.signature {
+                                do {
+                                    let isValid = try encryptionService.verify(signature, for: packet.payload, from: senderID)
+                                    if !isValid {
+                                        return
+                                    }
+                                } catch {
+                                    if !loggedCryptoErrors.contains(senderID) {
+                                        // print("[CRYPTO] Failed to verify signature from \(senderID): \(error)")
+                                        loggedCryptoErrors.insert(senderID)
+                                    }
+                                }
+                            }
+
+                            // Decrypt the message
+                            let decryptedPayload: Data
+                            do {
+                                let decryptedPadded = try encryptionService.decrypt(packet.payload, from: senderID)
+
+                                // Remove padding
+                                decryptedPayload = MessagePadding.unpad(decryptedPadded)
+                            } catch {
+                                // print("[CRYPTO] Failed to decrypt private message from \(senderID): \(error)")
                                 return
                             }
-                        } catch {
-                            if !loggedCryptoErrors.contains(senderID) {
-                                // print("[CRYPTO] Failed to verify signature from \(senderID): \(error)")
-                                loggedCryptoErrors.insert(senderID)
+
+                            // Parse the decrypted message
+                            if let message = BitchatMessage.fromBinaryPayload(decryptedPayload) {
+                                // Check if this is a dummy message for cover traffic
+                                if message.content.hasPrefix(self.coverTrafficPrefix) {
+                                    return  // Silently discard dummy messages
+                                }
+
+                                // Check if we've seen this exact message recently (within 5 seconds)
+                                let messageKey = "\(senderID)-\(message.content)-\(message.timestamp)"
+                                if let lastReceived = self.receivedMessageTimestamps[messageKey] {
+                                    let timeSinceLastReceived = Date().timeIntervalSince(lastReceived)
+                                    if timeSinceLastReceived < 5.0 {
+                                        // print("[DUPLICATE] Message from \(senderID) received \(timeSinceLastReceived)s after first")
+                                    }
+                                }
+                                self.receivedMessageTimestamps[messageKey] = Date()
+
+                                // Clean up old entries (older than 1 minute)
+                                let cutoffTime = Date().addingTimeInterval(-60)
+                                self.receivedMessageTimestamps = self.receivedMessageTimestamps.filter { $0.value > cutoffTime }
+
+                                peerNicknamesLock.lock()
+                                if peerNicknames[senderID] == nil {
+                                    peerNicknames[senderID] = message.sender
+                                }
+                                peerNicknamesLock.unlock()
+
+                                let messageWithPeerID = BitchatMessage(
+                                    id: message.id,  // Preserve the original message ID
+                                    sender: message.sender,
+                                    content: message.content,
+                                    timestamp: message.timestamp,
+                                    isRelay: message.isRelay,
+                                    originalSender: message.originalSender,
+                                    isPrivate: message.isPrivate,
+                                    recipientNickname: message.recipientNickname,
+                                    senderPeerID: senderID,
+                                    mentions: message.mentions,
+                                    channel: message.channel,
+                                    deliveryStatus: nil  // Will be set to .delivered in ChatViewModel
+                                )
+
+                                // Track last message time from this peer
+                                if let peerID = String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8) {
+                                    self.lastMessageFromPeer[peerID] = Date()
+                                }
+
+                                DispatchQueue.main.async {
+                                    self.delegate?.didReceiveMessage(messageWithPeerID)
+                                }
+
+                                // Generate and send ACK for private messages
+                                let viewModel = self.delegate as? ChatViewModel
+                                let myNickname = viewModel?.nickname ?? self.myPeerID
+                                if let ack = DeliveryTracker.shared.generateAck(
+                                    for: messageWithPeerID,
+                                    myPeerID: self.myPeerID,
+                                    myNickname: myNickname,
+                                    hopCount: UInt8(self.maxTTL - packet.ttl)
+                                ) {
+                                    self.sendDeliveryAck(ack, to: senderID)
+                                }
+                            }
+
+                        } else if packet.ttl > 0 {
+                            // RELAY PRIVATE MESSAGE (not for us)
+                            var relayPacket = packet
+                            relayPacket.ttl -= 1
+
+                            // Check if this message is for an offline favorite and cache it
+                            if let recipientIDString = String(data: recipientID.trimmingNullBytes(), encoding: .utf8),
+                               let publicKeyData = self.encryptionService.getPeerIdentityKey(recipientIDString) {
+                                let fingerprint = self.getPublicKeyFingerprint(publicKeyData)
+                                // Only cache if recipient is a favorite AND is currently offline
+                                if (self.delegate?.isFavorite(fingerprint: fingerprint) ?? false) && !self.activePeers.contains(recipientIDString) {
+                                    self.cacheMessage(relayPacket, messageID: messageID)
+                                }
+                            }
+
+                            // Private messages are important - use higher relay probability
+                            let relayProb = min(self.adaptiveRelayProbability + 0.15, 1.0)  // Boost by 15%
+
+                            // Always relay if TTL is high or we have few peers
+                            let shouldRelay = relayPacket.ttl >= 4 ||
+                            self.activePeers.count <= 3 ||
+                            Double.random(in: 0...1) < relayProb
+
+                            if shouldRelay {
+                                // Add random delay to prevent collision storms
+                                let delay = Double.random(in: minMessageDelay...maxMessageDelay)
+                                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                                    self?.broadcastPacket(relayPacket)
+                                }
                             }
                         }
                     }
                     
-                    // Parse broadcast message (not encrypted)
-                    if let message = BitchatMessage.fromBinaryPayload(packet.payload) {
-                            
-                        // Store nickname mapping
+                case .keyExchange:
+                    // Use senderID from packet for consistency
+                    if let senderID = String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8) {
+                        if packet.payload.count > 0 {
+                            let publicKeyData = packet.payload
+
+                            // Create a unique key for this exchange
+                            let exchangeKey = "\(senderID)-\(publicKeyData.hexEncodedString().prefix(16))"
+
+                            // Check if we've already processed this key exchange
+                            if processedKeyExchanges.contains(exchangeKey) {
+                                // print("[DEBUG] Ignoring duplicate key exchange from \(senderID)")
+                                return
+                            }
+
+                            // Mark this key exchange as processed
+                            processedKeyExchanges.insert(exchangeKey)
+                            do {
+                                try encryptionService.addPeerPublicKey(senderID, publicKeyData: publicKeyData)
+                            } catch {
+                                // print("[KEY_EXCHANGE] Failed to add public key for \(senderID): \(error)")
+                            }
+
+                            // Register identity key with view model for persistent favorites
+                            if let viewModel = self.delegate as? ChatViewModel,
+                               let identityKeyData = encryptionService.getPeerIdentityKey(senderID) {
+                                viewModel.registerPeerPublicKey(peerID: senderID, publicKeyData: identityKeyData)
+                            }
+
+                            // If we have RSSI from discovery, apply it to this peer
+                            if let peripheral = peripheral,
+                               let tempRSSI = peripheralRSSI[peripheral.identifier.uuidString] {
+                                peerRSSI[senderID] = tempRSSI
+                            }
+
+                            // Track this peer temporarily
+                            if senderID != "unknown" && senderID != myPeerID {
+                                // Check if we need to update peripheral mapping from the specific peripheral that sent this
+                                if let peripheral = peripheral {
+                                    // Check if we already have a different peripheral connected for this peer
+                                    if let existingPeripheral = self.connectedPeripherals[senderID],
+                                       existingPeripheral != peripheral {
+                                        // We have a duplicate connection - disconnect the newer one
+                                        // print("[DEBUG] Duplicate connection detected for \(senderID), keeping existing")
+                                        intentionalDisconnects.insert(peripheral.identifier.uuidString)
+                                        centralManager?.cancelPeripheralConnection(peripheral)
+                                        return
+                                    }
+
+                                    // Find if this peripheral is currently mapped with a temp ID
+                                    if let tempID = self.connectedPeripherals.first(where: { $0.value == peripheral })?.key,
+                                       tempID.count > 8 { // It's a temp ID
+                                        // Add real peer ID mapping BEFORE removing temp mapping
+                                        self.connectedPeripherals[senderID] = peripheral
+                                        // Then remove temp mapping
+                                        self.connectedPeripherals.removeValue(forKey: tempID)
+                                        // print("[DEBUG] Updated peripheral mapping from \(tempID) to \(senderID)")
+
+                                        // Transfer RSSI from temp ID to peer ID
+                                        if let rssi = self.peripheralRSSI[tempID] {
+                                            self.peerRSSI[senderID] = rssi
+                                            self.peripheralRSSI.removeValue(forKey: tempID)
+                                        }
+                                    } else {
+                                        if !self.connectedPeripherals.keys.contains(senderID) {
+                                            self.connectedPeripherals[senderID] = peripheral
+                                        }
+                                    }
+                                }
+
+                                // Add to active peers with proper locking
+                                activePeersLock.lock()
+                                let wasNewPeer = !activePeers.contains(senderID)
+                                if wasNewPeer {
+                                    activePeers.insert(senderID)
+                                    // print("[DEBUG] Added peer \(senderID) to active peers via key exchange")
+                                }
+                                activePeersLock.unlock()
+
+                                // Only notify if this was actually a new peer
+                                if wasNewPeer {
+                                    self.notifyPeerListUpdate(immediate: true)
+                                }
+                            }
+
+                            // Send announce with our nickname immediately
+                            self.sendAnnouncementToPeer(senderID)
+
+                            // Delay sending cached messages to ensure connection is fully established
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                                // Check if this peer has cached messages (especially for favorites)
+                                self?.sendCachedMessages(to: senderID)
+                            }
+                        }
+                    }
+                    
+                case .announce:
+                    if let nickname = String(data: packet.payload, encoding: .utf8),
+                       let senderID = String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8) {
+                        
+                        // Ignore if it's from ourselves
+                        if senderID == myPeerID {
+                            return
+                        }
+                        
+                        // Check if we've already announced this peer
+                        let isFirstAnnounce = !announcedPeers.contains(senderID)
+                        
+                        // Clean up stale peer IDs with the same nickname
                         peerNicknamesLock.lock()
-                        peerNicknames[senderID] = message.sender
+                        var stalePeerIDs: [String] = []
+                        for (existingPeerID, existingNickname) in peerNicknames {
+                            if existingNickname == nickname && existingPeerID != senderID {
+                                // Check if this peer was seen very recently (within 10 seconds)
+                                let wasRecentlySeen = peerLastSeenTimestamps[existingPeerID].map { Date().timeIntervalSince($0) < 10.0 } ?? false
+                                if !wasRecentlySeen {
+                                    // Found a stale peer ID with the same nickname
+                                    stalePeerIDs.append(existingPeerID)
+                                    // Found stale peer ID
+                                } else {
+                                    // Peer was seen recently, keeping both
+                                }
+                            }
+                        }
+                        
+                        // Remove stale peer IDs
+                        for stalePeerID in stalePeerIDs {
+                            // Removing stale peer
+                            peerNicknames.removeValue(forKey: stalePeerID)
+
+                            // Also remove from active peers
+                            activePeersLock.lock()
+                            activePeers.remove(stalePeerID)
+                            activePeersLock.unlock()
+
+                            // Remove from announced peers
+                            announcedPeers.remove(stalePeerID)
+                            announcedToPeers.remove(stalePeerID)
+
+                            // Disconnect any peripherals associated with stale ID
+                            if let peripheral = connectedPeripherals[stalePeerID] {
+                                intentionalDisconnects.insert(peripheral.identifier.uuidString)
+                                centralManager?.cancelPeripheralConnection(peripheral)
+                                connectedPeripherals.removeValue(forKey: stalePeerID)
+                                peripheralCharacteristics.removeValue(forKey: peripheral)
+                            }
+
+                            // Remove RSSI data
+                            peerRSSI.removeValue(forKey: stalePeerID)
+
+                            // Clear cached messages tracking
+                            cachedMessagesSentToPeer.remove(stalePeerID)
+
+                            // Remove from last seen timestamps
+                            peerLastSeenTimestamps.removeValue(forKey: stalePeerID)
+
+                            // Remove from processed key exchanges
+                            processedKeyExchanges = processedKeyExchanges.filter { !$0.contains(stalePeerID) }
+                        }
+                        
+                        // If we had stale peers, notify the UI immediately
+                        if !stalePeerIDs.isEmpty {
+                            DispatchQueue.main.async { [weak self] in
+                                self?.notifyPeerListUpdate(immediate: true)
+                            }
+                        }
+                        
+                        // Now add the new peer ID with the nickname
+                        peerNicknames[senderID] = nickname
                         peerNicknamesLock.unlock()
-                        
-                        // Handle encrypted channel messages
-                        var finalContent = message.content
-                        if message.isEncrypted, let channel = message.channel, let encryptedData = message.encryptedContent {
-                            // Try to decrypt the content
-                            if let decryptedContent = self.delegate?.decryptChannelMessage(encryptedData, channel: channel) {
-                                finalContent = decryptedContent
+
+                        // Note: We can't update peripheral mapping here since we don't have
+                        // access to which peripheral sent this announce. The mapping will be
+                        // updated when we receive key exchange packets where we do have the peripheral.
+
+                        // Add to active peers if not already there
+                        if senderID != "unknown" {
+                            activePeersLock.lock()
+                            let wasInserted = activePeers.insert(senderID).inserted
+                            activePeersLock.unlock()
+                            if wasInserted {
+                                // Added peer \(senderID) (\(nickname)) to active peers
+                            }
+                            
+                            // Show join message only for first announce
+                            if isFirstAnnounce {
+                                announcedPeers.insert(senderID)
+                                DispatchQueue.main.async {
+                                    self.delegate?.didConnectToPeer(nickname)
+                                }
+                                self.notifyPeerListUpdate(immediate: true)
+                                
+                                DispatchQueue.main.async {
+                                    // Check if this is a favorite peer and send notification
+                                    // Note: This might not work immediately if key exchange hasn't happened yet
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                                        guard let self = self else { return }
+
+                                        // Check if this is a favorite using their public key fingerprint
+                                        if let publicKeyData = self.encryptionService.getPeerIdentityKey(senderID) {
+                                            let fingerprint = self.getPublicKeyFingerprint(publicKeyData)
+                                            if self.delegate?.isFavorite(fingerprint: fingerprint) ?? false {
+                                                NotificationService.shared.sendFavoriteOnlineNotification(nickname: nickname)
+
+                                                // Send any cached messages for this favorite
+                                                self.sendCachedMessages(to: senderID)
+                                            }
+                                        }
+                                    }
+                                }
                             } else {
-                                // Unable to decrypt - show placeholder
-                                finalContent = "[Encrypted message - password required]"
+                                // Just update the peer list
+                                self.notifyPeerListUpdate()
                             }
+                        } else {
                         }
                         
-                        let messageWithPeerID = BitchatMessage(
-                            id: message.id,  // Preserve the original message ID
-                            sender: message.sender,
-                            content: finalContent,
-                            timestamp: message.timestamp,
-                            isRelay: message.isRelay,
-                            originalSender: message.originalSender,
-                            isPrivate: false,
-                            recipientNickname: nil,
-                            senderPeerID: senderID,
-                            mentions: message.mentions,
-                            channel: message.channel,
-                            encryptedContent: message.encryptedContent,
-                            isEncrypted: message.isEncrypted
-                        )
-                        
-                        // Track last message time from this peer
-                        if let peerID = String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8) {
-                            self.lastMessageFromPeer[peerID] = Date()
-                        }
-                        
-                        DispatchQueue.main.async {
-                            self.delegate?.didReceiveMessage(messageWithPeerID)
-                        }
-                        
-                        // Generate and send ACK for channel messages if we're mentioned or it's a small channel
-                        let viewModel = self.delegate as? ChatViewModel
-                        let myNickname = viewModel?.nickname ?? self.myPeerID
-                        if let _ = message.channel,
-                           let mentions = message.mentions,
-                           (mentions.contains(myNickname) || self.activePeers.count < 10) {
-                            if let ack = DeliveryTracker.shared.generateAck(
-                                for: messageWithPeerID,
-                                myPeerID: self.myPeerID,
-                                myNickname: myNickname,
-                                hopCount: UInt8(self.maxTTL - packet.ttl)
-                            ) {
-                                self.sendDeliveryAck(ack, to: senderID)
-                            }
-                        }
-                    }
-                    
-                    // Relay broadcast messages
-                    var relayPacket = packet
-                    relayPacket.ttl -= 1
-                    if relayPacket.ttl > 0 {
-                        // Probabilistic flooding with smart relay decisions
-                        let relayProb = self.adaptiveRelayProbability
-                        
-                        // Always relay if TTL is high (fresh messages need to spread)
-                        // or if we have few peers (ensure coverage in sparse networks)
-                        let shouldRelay = relayPacket.ttl >= 4 || 
-                                         self.activePeers.count <= 3 ||
-                                         Double.random(in: 0...1) < relayProb
-                        
-                        if shouldRelay {
-                            // Add random delay to prevent collision storms
-                            let delay = Double.random(in: minMessageDelay...maxMessageDelay)
+                        // Relay announce if TTL > 0
+                        if packet.ttl > 1 {
+                            var relayPacket = packet
+                            relayPacket.ttl -= 1
+
+                            // Add small delay to prevent collision
+                            let delay = Double.random(in: 0.1...0.3)
                             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                                 self?.broadcastPacket(relayPacket)
                             }
                         }
+                    } else {
                     }
                     
-                } else if let recipientIDString = String(data: recipientID.trimmingNullBytes(), encoding: .utf8),
-                          recipientIDString == myPeerID {
-                    // PRIVATE MESSAGE FOR US
-                    
-                    // Verify signature if present
-                    if let signature = packet.signature {
-                        do {
-                            let isValid = try encryptionService.verify(signature, for: packet.payload, from: senderID)
-                            if !isValid {
-                                return
+                case .leave:
+                    if let senderID = String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8) {
+                        // Check if payload contains a channel hashtag
+                        if let channel = String(data: packet.payload, encoding: .utf8),
+                           channel.hasPrefix("#") {
+                            // Channel leave notification
+
+                            DispatchQueue.main.async {
+                                self.delegate?.didReceiveChannelLeave(channel, from: senderID)
                             }
-                        } catch {
-                            if !loggedCryptoErrors.contains(senderID) {
-                                // print("[CRYPTO] Failed to verify signature from \(senderID): \(error)")
-                                loggedCryptoErrors.insert(senderID)
+
+                            // Relay if TTL > 0
+                            if packet.ttl > 1 {
+                                var relayPacket = packet
+                                relayPacket.ttl -= 1
+                                self.broadcastPacket(relayPacket)
+                            }
+                        } else {
+                            // Legacy peer disconnect (keeping for backwards compatibility)
+                            if let nickname = String(data: packet.payload, encoding: .utf8) {
+                                // Remove from active peers with proper locking
+                                activePeersLock.lock()
+                                activePeers.remove(senderID)
+                                activePeersLock.unlock()
+
+                                announcedPeers.remove(senderID)
+
+                                // Show leave message
+                                DispatchQueue.main.async {
+                                    self.delegate?.didDisconnectFromPeer(nickname)
+                                }
+                                self.notifyPeerListUpdate()
+
+                                // Clean up peer data
+                                peerNicknamesLock.lock()
+                                peerNicknames.removeValue(forKey: senderID)
+                                peerNicknamesLock.unlock()
                             }
                         }
                     }
                     
-                    // Decrypt the message
-                    let decryptedPayload: Data
-                    do {
-                        let decryptedPadded = try encryptionService.decrypt(packet.payload, from: senderID)
-                        
-                        // Remove padding
-                        decryptedPayload = MessagePadding.unpad(decryptedPadded)
-                    } catch {
-                        // print("[CRYPTO] Failed to decrypt private message from \(senderID): \(error)")
+                case .fragmentStart, .fragmentContinue, .fragmentEnd:
+                    // let fragmentTypeStr = packet.type == MessageType.fragmentStart.rawValue ? "START" :
+                    //                    (packet.type == MessageType.fragmentContinue.rawValue ? "CONTINUE" : "END")
+                    
+                    // Validate fragment has minimum required size
+                    if packet.payload.count < 13 {
                         return
                     }
                     
-                    // Parse the decrypted message
-                    if let message = BitchatMessage.fromBinaryPayload(decryptedPayload) {
-                        // Check if this is a dummy message for cover traffic
-                        if message.content.hasPrefix(self.coverTrafficPrefix) {
-                                return  // Silently discard dummy messages
-                        }
-                        
-                        // Check if we've seen this exact message recently (within 5 seconds)
-                        let messageKey = "\(senderID)-\(message.content)-\(message.timestamp)"
-                        if let lastReceived = self.receivedMessageTimestamps[messageKey] {
-                            let timeSinceLastReceived = Date().timeIntervalSince(lastReceived)
-                            if timeSinceLastReceived < 5.0 {
-                                // print("[DUPLICATE] Message from \(senderID) received \(timeSinceLastReceived)s after first")
-                            }
-                        }
-                        self.receivedMessageTimestamps[messageKey] = Date()
-                        
-                        // Clean up old entries (older than 1 minute)
-                        let cutoffTime = Date().addingTimeInterval(-60)
-                        self.receivedMessageTimestamps = self.receivedMessageTimestamps.filter { $0.value > cutoffTime }
-                        
-                        peerNicknamesLock.lock()
-                        if peerNicknames[senderID] == nil {
-                            peerNicknames[senderID] = message.sender
-                        }
-                        peerNicknamesLock.unlock()
-                        
-                        let messageWithPeerID = BitchatMessage(
-                            id: message.id,  // Preserve the original message ID
-                            sender: message.sender,
-                            content: message.content,
-                            timestamp: message.timestamp,
-                            isRelay: message.isRelay,
-                            originalSender: message.originalSender,
-                            isPrivate: message.isPrivate,
-                            recipientNickname: message.recipientNickname,
-                            senderPeerID: senderID,
-                            mentions: message.mentions,
-                            channel: message.channel,
-                            deliveryStatus: nil  // Will be set to .delivered in ChatViewModel
-                        )
-                        
-                        // Track last message time from this peer
-                        if let peerID = String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8) {
-                            self.lastMessageFromPeer[peerID] = Date()
-                        }
-                        
-                        DispatchQueue.main.async {
-                            self.delegate?.didReceiveMessage(messageWithPeerID)
-                        }
-                        
-                        // Generate and send ACK for private messages
-                        let viewModel = self.delegate as? ChatViewModel
-                        let myNickname = viewModel?.nickname ?? self.myPeerID
-                        if let ack = DeliveryTracker.shared.generateAck(
-                            for: messageWithPeerID,
-                            myPeerID: self.myPeerID,
-                            myNickname: myNickname,
-                            hopCount: UInt8(self.maxTTL - packet.ttl)
-                        ) {
-                            self.sendDeliveryAck(ack, to: senderID)
-                        }
-                    }
+                    handleFragment(packet, from: peerID)
                     
-                } else if packet.ttl > 0 {
-                    // RELAY PRIVATE MESSAGE (not for us)
+                    // Relay fragments if TTL > 0
                     var relayPacket = packet
                     relayPacket.ttl -= 1
-                    
-                    // Check if this message is for an offline favorite and cache it
-                    if let recipientIDString = String(data: recipientID.trimmingNullBytes(), encoding: .utf8),
-                       let publicKeyData = self.encryptionService.getPeerIdentityKey(recipientIDString) {
-                        let fingerprint = self.getPublicKeyFingerprint(publicKeyData)
-                        // Only cache if recipient is a favorite AND is currently offline
-                        if (self.delegate?.isFavorite(fingerprint: fingerprint) ?? false) && !self.activePeers.contains(recipientIDString) {
-                            self.cacheMessage(relayPacket, messageID: messageID)
-                        }
+                    if relayPacket.ttl > 0 {
+                        self.broadcastPacket(relayPacket)
                     }
                     
-                    // Private messages are important - use higher relay probability
-                    let relayProb = min(self.adaptiveRelayProbability + 0.15, 1.0)  // Boost by 15%
-                    
-                    // Always relay if TTL is high or we have few peers
-                    let shouldRelay = relayPacket.ttl >= 4 || 
-                                     self.activePeers.count <= 3 ||
-                                     Double.random(in: 0...1) < relayProb
-                    
-                    if shouldRelay {
-                        // Add random delay to prevent collision storms
-                        let delay = Double.random(in: minMessageDelay...maxMessageDelay)
-                        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                            self?.broadcastPacket(relayPacket)
-                        }
-                    }
-                }
-            }
-            
-        case .keyExchange:
-            // Use senderID from packet for consistency
-            if let senderID = String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8) {
-                if packet.payload.count > 0 {
-                    let publicKeyData = packet.payload
-                    
-                    // Create a unique key for this exchange
-                    let exchangeKey = "\(senderID)-\(publicKeyData.hexEncodedString().prefix(16))"
-                    
-                    // Check if we've already processed this key exchange
-                    if processedKeyExchanges.contains(exchangeKey) {
-                        // print("[DEBUG] Ignoring duplicate key exchange from \(senderID)")
-                        return
-                    }
-                    
-                    // Mark this key exchange as processed
-                    processedKeyExchanges.insert(exchangeKey)
-                    do {
-                        try encryptionService.addPeerPublicKey(senderID, publicKeyData: publicKeyData)
-                    } catch {
-                        // print("[KEY_EXCHANGE] Failed to add public key for \(senderID): \(error)")
-                    }
-                    
-                    // Register identity key with view model for persistent favorites
-                    if let viewModel = self.delegate as? ChatViewModel,
-                       let identityKeyData = encryptionService.getPeerIdentityKey(senderID) {
-                        viewModel.registerPeerPublicKey(peerID: senderID, publicKeyData: identityKeyData)
-                    }
-                    
-                    // If we have RSSI from discovery, apply it to this peer
-                    if let peripheral = peripheral,
-                       let tempRSSI = peripheralRSSI[peripheral.identifier.uuidString] {
-                        peerRSSI[senderID] = tempRSSI
-                    }
-                    
-                    // Track this peer temporarily
-                    if senderID != "unknown" && senderID != myPeerID {
-                        // Check if we need to update peripheral mapping from the specific peripheral that sent this
-                        if let peripheral = peripheral {
-                            // Check if we already have a different peripheral connected for this peer
-                            if let existingPeripheral = self.connectedPeripherals[senderID],
-                               existingPeripheral != peripheral {
-                                // We have a duplicate connection - disconnect the newer one
-                                // print("[DEBUG] Duplicate connection detected for \(senderID), keeping existing")
-                                intentionalDisconnects.insert(peripheral.identifier.uuidString)
-                                centralManager?.cancelPeripheralConnection(peripheral)
-                                return
+                case .channelAnnounce:
+                    if let payloadStr = String(data: packet.payload, encoding: .utf8) {
+                        // Parse payload: channel|isProtected|creatorID|keyCommitment
+                        let components = payloadStr.split(separator: "|").map(String.init)
+                        if components.count >= 3 {
+                            let channel = components[0]
+                            let isProtected = components[1] == "1"
+                            let creatorID = components[2]
+                            let keyCommitment = components.count >= 4 ? components[3] : nil
+
+
+                            DispatchQueue.main.async {
+                                self.delegate?.didReceivePasswordProtectedChannelAnnouncement(channel, isProtected: isProtected, creatorID: creatorID, keyCommitment: keyCommitment)
                             }
-                            
-                            // Find if this peripheral is currently mapped with a temp ID
-                            if let tempID = self.connectedPeripherals.first(where: { $0.value == peripheral })?.key,
-                               tempID.count > 8 { // It's a temp ID
-                                // Add real peer ID mapping BEFORE removing temp mapping
-                                self.connectedPeripherals[senderID] = peripheral
-                                // Then remove temp mapping
-                                self.connectedPeripherals.removeValue(forKey: tempID)
-                                // print("[DEBUG] Updated peripheral mapping from \(tempID) to \(senderID)")
-                                
-                                // Transfer RSSI from temp ID to peer ID
-                                if let rssi = self.peripheralRSSI[tempID] {
-                                    self.peerRSSI[senderID] = rssi
-                                    self.peripheralRSSI.removeValue(forKey: tempID)
-                                }
-                            } else {
-                                if !self.connectedPeripherals.keys.contains(senderID) {
-                                    self.connectedPeripherals[senderID] = peripheral
-                                }
+
+                            // Relay announcement
+                            if packet.ttl > 1 {
+                                var relayPacket = packet
+                                relayPacket.ttl -= 1
+                                self.broadcastPacket(relayPacket)
                             }
                         }
-                        
-                        // Add to active peers with proper locking
-                        activePeersLock.lock()
-                        let wasNewPeer = !activePeers.contains(senderID)
-                        if wasNewPeer {
-                            activePeers.insert(senderID)
-                            // print("[DEBUG] Added peer \(senderID) to active peers via key exchange")
-                        }
-                        activePeersLock.unlock()
-                        
-                        // Only notify if this was actually a new peer
-                        if wasNewPeer {
-                            self.notifyPeerListUpdate(immediate: true)
-                        }
                     }
-                    
-                    // Send announce with our nickname immediately
-                    self.sendAnnouncementToPeer(senderID)
-                    
-                    // Delay sending cached messages to ensure connection is fully established
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                        // Check if this peer has cached messages (especially for favorites)
-                        self?.sendCachedMessages(to: senderID)
-                    }
-                }
-            }
-            
-        case .announce:
-            if let nickname = String(data: packet.payload, encoding: .utf8), 
-               let senderID = String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8) {
-                
-                // Ignore if it's from ourselves
-                if senderID == myPeerID {
-                    return
-                }
-                
-                // Check if we've already announced this peer
-                let isFirstAnnounce = !announcedPeers.contains(senderID)
-                
-                // Clean up stale peer IDs with the same nickname
-                peerNicknamesLock.lock()
-                var stalePeerIDs: [String] = []
-                for (existingPeerID, existingNickname) in peerNicknames {
-                    if existingNickname == nickname && existingPeerID != senderID {
-                        // Check if this peer was seen very recently (within 10 seconds)
-                        let wasRecentlySeen = peerLastSeenTimestamps[existingPeerID].map { Date().timeIntervalSince($0) < 10.0 } ?? false
-                        if !wasRecentlySeen {
-                            // Found a stale peer ID with the same nickname
-                            stalePeerIDs.append(existingPeerID)
-                            // Found stale peer ID
-                        } else {
-                            // Peer was seen recently, keeping both
-                        }
-                    }
-                }
-                
-                // Remove stale peer IDs
-                for stalePeerID in stalePeerIDs {
-                    // Removing stale peer
-                    peerNicknames.removeValue(forKey: stalePeerID)
-                    
-                    // Also remove from active peers
-                    activePeersLock.lock()
-                    activePeers.remove(stalePeerID)
-                    activePeersLock.unlock()
-                    
-                    // Remove from announced peers
-                    announcedPeers.remove(stalePeerID)
-                    announcedToPeers.remove(stalePeerID)
-                    
-                    // Disconnect any peripherals associated with stale ID
-                    if let peripheral = connectedPeripherals[stalePeerID] {
-                        intentionalDisconnects.insert(peripheral.identifier.uuidString)
-                        centralManager?.cancelPeripheralConnection(peripheral)
-                        connectedPeripherals.removeValue(forKey: stalePeerID)
-                        peripheralCharacteristics.removeValue(forKey: peripheral)
-                    }
-                    
-                    // Remove RSSI data
-                    peerRSSI.removeValue(forKey: stalePeerID)
-                    
-                    // Clear cached messages tracking
-                    cachedMessagesSentToPeer.remove(stalePeerID)
-                    
-                    // Remove from last seen timestamps
-                    peerLastSeenTimestamps.removeValue(forKey: stalePeerID)
-                    
-                    // Remove from processed key exchanges
-                    processedKeyExchanges = processedKeyExchanges.filter { !$0.contains(stalePeerID) }
-                }
-                
-                // If we had stale peers, notify the UI immediately
-                if !stalePeerIDs.isEmpty {
-                    DispatchQueue.main.async { [weak self] in
-                        self?.notifyPeerListUpdate(immediate: true)
-                    }
-                }
-                
-                // Now add the new peer ID with the nickname
-                peerNicknames[senderID] = nickname
-                peerNicknamesLock.unlock()
-                
-                // Note: We can't update peripheral mapping here since we don't have 
-                // access to which peripheral sent this announce. The mapping will be
-                // updated when we receive key exchange packets where we do have the peripheral.
-                
-                // Add to active peers if not already there
-                if senderID != "unknown" {
-                    activePeersLock.lock()
-                    let wasInserted = activePeers.insert(senderID).inserted
-                    activePeersLock.unlock()
-                    if wasInserted {
-                        // Added peer \(senderID) (\(nickname)) to active peers
-                    }
-                    
-                    // Show join message only for first announce
-                    if isFirstAnnounce {
-                        announcedPeers.insert(senderID)
-                        DispatchQueue.main.async {
-                            self.delegate?.didConnectToPeer(nickname)
-                        }
-                        self.notifyPeerListUpdate(immediate: true)
-                        
-                        DispatchQueue.main.async {
-                            // Check if this is a favorite peer and send notification
-                            // Note: This might not work immediately if key exchange hasn't happened yet
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                                guard let self = self else { return }
-                                
-                                // Check if this is a favorite using their public key fingerprint
-                                if let publicKeyData = self.encryptionService.getPeerIdentityKey(senderID) {
-                                    let fingerprint = self.getPublicKeyFingerprint(publicKeyData)
-                                    if self.delegate?.isFavorite(fingerprint: fingerprint) ?? false {
-                                        NotificationService.shared.sendFavoriteOnlineNotification(nickname: nickname)
-                                        
-                                        // Send any cached messages for this favorite
-                                        self.sendCachedMessages(to: senderID)
+
+                case .deliveryAck:
+                    // Handle delivery acknowledgment
+                    if let recipientIDData = packet.recipientID,
+                       let recipientID = String(data: recipientIDData.trimmingNullBytes(), encoding: .utf8),
+                       recipientID == myPeerID {
+                        // This ACK is for us - decrypt it
+                        if let senderID = String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8) {
+                            do {
+                                let decryptedData = try encryptionService.decrypt(packet.payload, from: senderID)
+                                if let ack = DeliveryAck.decode(from: decryptedData) {
+                                    // Process the ACK
+                                    DeliveryTracker.shared.processDeliveryAck(ack)
+
+                                    // Notify delegate
+                                    DispatchQueue.main.async {
+                                        self.delegate?.didReceiveDeliveryAck(ack)
                                     }
                                 }
+                            } catch {
+                                // Failed to decrypt ACK - might be from unknown sender
                             }
                         }
-                    } else {
-                        // Just update the peer list
-                        self.notifyPeerListUpdate()
-                    }
-                } else {
-                }
-                
-                // Relay announce if TTL > 0
-                if packet.ttl > 1 {
-                    var relayPacket = packet
-                    relayPacket.ttl -= 1
-                    
-                    // Add small delay to prevent collision
-                    let delay = Double.random(in: 0.1...0.3)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                        self?.broadcastPacket(relayPacket)
-                    }
-                }
-            } else {
-            }
-            
-        case .leave:
-            if let senderID = String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8) {
-                // Check if payload contains a channel hashtag
-                if let channel = String(data: packet.payload, encoding: .utf8),
-                   channel.hasPrefix("#") {
-                    // Channel leave notification
-                    
-                    DispatchQueue.main.async {
-                        self.delegate?.didReceiveChannelLeave(channel, from: senderID)
-                    }
-                    
-                    // Relay if TTL > 0
-                    if packet.ttl > 1 {
+                    } else if packet.ttl > 0 {
+                        // Relay the ACK if not for us
                         var relayPacket = packet
                         relayPacket.ttl -= 1
                         self.broadcastPacket(relayPacket)
                     }
-                } else {
-                    // Legacy peer disconnect (keeping for backwards compatibility)
-                    if let nickname = String(data: packet.payload, encoding: .utf8) {
-                        // Remove from active peers with proper locking
-                        activePeersLock.lock()
-                        activePeers.remove(senderID)
-                        activePeersLock.unlock()
-                        
-                        announcedPeers.remove(senderID)
-                        
-                        // Show leave message
-                        DispatchQueue.main.async {
-                            self.delegate?.didDisconnectFromPeer(nickname)
-                        }
-                        self.notifyPeerListUpdate()
-                        
-                        // Clean up peer data
-                        peerNicknamesLock.lock()
-                        peerNicknames.removeValue(forKey: senderID)
-                        peerNicknamesLock.unlock()
-                    }
-                }
-            }
-            
-        case .fragmentStart, .fragmentContinue, .fragmentEnd:
-            // let fragmentTypeStr = packet.type == MessageType.fragmentStart.rawValue ? "START" : 
-            //                    (packet.type == MessageType.fragmentContinue.rawValue ? "CONTINUE" : "END")
-            
-            // Validate fragment has minimum required size
-            if packet.payload.count < 13 {
-                return
-            }
-            
-            handleFragment(packet, from: peerID)
-            
-            // Relay fragments if TTL > 0
-            var relayPacket = packet
-            relayPacket.ttl -= 1
-            if relayPacket.ttl > 0 {
-                self.broadcastPacket(relayPacket)
-            }
-            
-        case .channelAnnounce:
-            if let payloadStr = String(data: packet.payload, encoding: .utf8) {
-                // Parse payload: channel|isProtected|creatorID|keyCommitment
-                let components = payloadStr.split(separator: "|").map(String.init)
-                if components.count >= 3 {
-                    let channel = components[0]
-                    let isProtected = components[1] == "1"
-                    let creatorID = components[2]
-                    let keyCommitment = components.count >= 4 ? components[3] : nil
                     
-                    
-                    DispatchQueue.main.async {
-                        self.delegate?.didReceivePasswordProtectedChannelAnnouncement(channel, isProtected: isProtected, creatorID: creatorID, keyCommitment: keyCommitment)
-                    }
-                    
-                    // Relay announcement
-                    if packet.ttl > 1 {
-                        var relayPacket = packet
-                        relayPacket.ttl -= 1
-                        self.broadcastPacket(relayPacket)
-                    }
-                }
-            }
-            
-        case .deliveryAck:
-            // Handle delivery acknowledgment
-            if let recipientIDData = packet.recipientID,
-               let recipientID = String(data: recipientIDData.trimmingNullBytes(), encoding: .utf8),
-               recipientID == myPeerID {
-                // This ACK is for us - decrypt it
-                if let senderID = String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8) {
-                    do {
-                        let decryptedData = try encryptionService.decrypt(packet.payload, from: senderID)
-                        if let ack = DeliveryAck.decode(from: decryptedData) {
-                            // Process the ACK
-                            DeliveryTracker.shared.processDeliveryAck(ack)
+                case .channelRetention:
+                    if let payloadStr = String(data: packet.payload, encoding: .utf8) {
+                        // Parse payload: channel|enabled|creatorID
+                        let components = payloadStr.split(separator: "|").map(String.init)
+                        if components.count >= 3 {
+                            let channel = components[0]
+                            let enabled = components[1] == "1"
+                            let creatorID = components[2]
+
                             
-                            // Notify delegate
                             DispatchQueue.main.async {
-                                self.delegate?.didReceiveDeliveryAck(ack)
+                                self.delegate?.didReceiveChannelRetentionAnnouncement(channel, enabled: enabled, creatorID: creatorID)
+                            }
+
+                            // Relay announcement
+                            if packet.ttl > 1 {
+                                var relayPacket = packet
+                                relayPacket.ttl -= 1
+                                self.broadcastPacket(relayPacket)
                             }
                         }
-                    } catch {
-                        // Failed to decrypt ACK - might be from unknown sender
-                    }
-                }
-            } else if packet.ttl > 0 {
-                // Relay the ACK if not for us
-                var relayPacket = packet
-                relayPacket.ttl -= 1
-                self.broadcastPacket(relayPacket)
-            }
-            
-        case .channelRetention:
-            if let payloadStr = String(data: packet.payload, encoding: .utf8) {
-                // Parse payload: channel|enabled|creatorID
-                let components = payloadStr.split(separator: "|").map(String.init)
-                if components.count >= 3 {
-                    let channel = components[0]
-                    let enabled = components[1] == "1"
-                    let creatorID = components[2]
-                    
-                    
-                    DispatchQueue.main.async {
-                        self.delegate?.didReceiveChannelRetentionAnnouncement(channel, enabled: enabled, creatorID: creatorID)
                     }
                     
-                    // Relay announcement
-                    if packet.ttl > 1 {
+                case .readReceipt:
+                    // Handle read receipt
+                    if let recipientIDData = packet.recipientID,
+                       let recipientID = String(data: recipientIDData.trimmingNullBytes(), encoding: .utf8),
+                       recipientID == myPeerID {
+                        // This read receipt is for us - decrypt it
+                        if let senderID = String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8) {
+                            do {
+                                let decryptedData = try encryptionService.decrypt(packet.payload, from: senderID)
+                                if let receipt = ReadReceipt.decode(from: decryptedData) {
+                                    // Process the read receipt
+                                    DispatchQueue.main.async {
+                                        self.delegate?.didReceiveReadReceipt(receipt)
+                                    }
+                                }
+                            } catch {
+                                // Failed to decrypt read receipt - might be from unknown sender
+                            }
+                        }
+                    } else if packet.ttl > 0 {
+                        // Relay the read receipt if not for us
                         var relayPacket = packet
                         relayPacket.ttl -= 1
                         self.broadcastPacket(relayPacket)
                     }
+
+                default:
+                    break
                 }
             }
-            
-        case .readReceipt:
-            // Handle read receipt
-            if let recipientIDData = packet.recipientID,
-               let recipientID = String(data: recipientIDData.trimmingNullBytes(), encoding: .utf8),
-               recipientID == myPeerID {
-                // This read receipt is for us - decrypt it
-                if let senderID = String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8) {
-                    do {
-                        let decryptedData = try encryptionService.decrypt(packet.payload, from: senderID)
-                        if let receipt = ReadReceipt.decode(from: decryptedData) {
-                            // Process the read receipt
-                            DispatchQueue.main.async {
-                                self.delegate?.didReceiveReadReceipt(receipt)
-                            }
-                        }
-                    } catch {
-                        // Failed to decrypt read receipt - might be from unknown sender
-                    }
-                }
-            } else if packet.ttl > 0 {
-                // Relay the read receipt if not for us
-                var relayPacket = packet
-                relayPacket.ttl -= 1
-                self.broadcastPacket(relayPacket)
+            catch {
+                print("Error handling received packet: \(error)")
             }
-            
-        default:
-            break
-        }
         }
     }
     
@@ -2231,6 +2236,7 @@ class BluetoothMeshService: NSObject {
 
 extension BluetoothMeshService: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        print("[BluetoothMeshService] centralManagerDidUpdateState: \(central.state)")
         // Central manager state updated
         if central.state == .poweredOn {
             startScanning()
@@ -2243,6 +2249,7 @@ extension BluetoothMeshService: CBCentralManagerDelegate {
     }
     
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
+        print("[BluetoothMeshService] didDiscover peripheral: \(peripheral.identifier) RSSI: \(RSSI)")
         // Optimize for 300m range - only connect to strong enough signals
         let rssiValue = RSSI.intValue
         
@@ -2317,6 +2324,7 @@ extension BluetoothMeshService: CBCentralManagerDelegate {
     }
     
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        print("[BluetoothMeshService] didConnect peripheral: \(peripheral.identifier)")
         peripheral.delegate = self
         peripheral.discoverServices([BluetoothMeshService.serviceUUID])
         
@@ -2340,6 +2348,7 @@ extension BluetoothMeshService: CBCentralManagerDelegate {
     }
     
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        print("[BluetoothMeshService] didDisconnectPeripheral peripheral: \(peripheral.identifier) error: \(String(describing: error))")
         let peripheralID = peripheral.identifier.uuidString
         
         // Check if this was an intentional disconnect
@@ -2500,13 +2509,14 @@ extension BluetoothMeshService: CBPeripheralDelegate {
     }
     
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        print("[BluetoothMeshService] didUpdateValueFor characteristic: \(characteristic.uuid) from peripheral: \(peripheral.identifier)")
         guard let data = characteristic.value else {
             return
         }
         
-        guard let packet = BitchatPacket.from(data) else { 
+        guard let packet = BitchatPacket.from(data) else {
             // Failed to parse packet
-            return 
+            return
         }
         
         // Use the sender ID from the packet, not our local mapping which might still be a temp ID
@@ -2514,10 +2524,12 @@ extension BluetoothMeshService: CBPeripheralDelegate {
         let packetSenderID = String(data: packet.senderID.trimmingNullBytes(), encoding: .utf8) ?? "unknown"
         
         // Always handle received packets
+        print("[BluetoothMeshService] Handling received packet of type \(packet.type) from \(packetSenderID)")
         handleReceivedPacket(packet, from: packetSenderID, peripheral: peripheral)
     }
     
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        print("[BluetoothMeshService] didWriteValueFor characteristic: \(characteristic.uuid) to peripheral: \(peripheral.identifier) error: \(String(describing: error))")
         if let error = error {
             // Log error but don't spam for common errors
             let errorCode = (error as NSError).code
@@ -2570,6 +2582,7 @@ extension BluetoothMeshService: CBPeripheralDelegate {
 
 extension BluetoothMeshService: CBPeripheralManagerDelegate {
     func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
+        print("[BluetoothMeshService] peripheralManagerDidUpdateState: \(peripheral.state)")
         // Peripheral manager state updated
         switch peripheral.state {
         case .poweredOn:

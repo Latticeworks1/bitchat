@@ -1680,58 +1680,61 @@ class ChatViewModel: ObservableObject {
 
 extension ChatViewModel: BitchatDelegate {
     func didReceiveChannelLeave(_ channel: String, from peerID: String) {
-        // Remove peer from channel members
-        if channelMembers[channel] != nil {
-            channelMembers[channel]?.remove(peerID)
-            
-            // Force UI update
-            objectWillChange.send()
+        DispatchQueue.main.async {
+            // Remove peer from channel members
+            if self.channelMembers[channel] != nil {
+                self.channelMembers[channel]?.remove(peerID)
+
+                // Force UI update
+                self.objectWillChange.send()
+            }
         }
     }
     
     func didReceivePasswordProtectedChannelAnnouncement(_ channel: String, isProtected: Bool, creatorID: String?, keyCommitment: String?) {
-        let wasAlreadyProtected = passwordProtectedChannels.contains(channel)
-        
-        if isProtected {
-            passwordProtectedChannels.insert(channel)
-            if let creator = creatorID {
-                channelCreators[channel] = creator
-            }
+        DispatchQueue.main.async {
+            let wasAlreadyProtected = self.passwordProtectedChannels.contains(channel)
             
-            // Store the key commitment if provided
-            if let commitment = keyCommitment {
-                channelKeyCommitments[channel] = commitment
-            }
-            
-            // If we just learned this channel is protected and we're in it without a key, prompt for password
-            if !wasAlreadyProtected && joinedChannels.contains(channel) && channelKeys[channel] == nil {
-                
-                // Add system message
-                let systemMessage = BitchatMessage(
-                    sender: "system",
-                    content: "channel \(channel) is password protected. you need the password to participate.",
-                    timestamp: Date(),
-                    isRelay: false
-                )
-                messages.append(systemMessage)
-                
-                // If currently viewing this channel, show password prompt
-                if currentChannel == channel {
-                    passwordPromptChannel = channel
-                    showPasswordPrompt = true
+            if isProtected {
+                self.passwordProtectedChannels.insert(channel)
+                if let creator = creatorID {
+                    self.channelCreators[channel] = creator
                 }
+                
+                // Store the key commitment if provided
+                if let commitment = keyCommitment {
+                    self.channelKeyCommitments[channel] = commitment
+                }
+                
+                // If we just learned this channel is protected and we're in it without a key, prompt for password
+                if !wasAlreadyProtected && self.joinedChannels.contains(channel) && self.channelKeys[channel] == nil {
+
+                    // Add system message
+                    let systemMessage = BitchatMessage(
+                        sender: "system",
+                        content: "channel \(channel) is password protected. you need the password to participate.",
+                        timestamp: Date(),
+                        isRelay: false
+                    )
+                    self.messages.append(systemMessage)
+
+                    // If currently viewing this channel, show password prompt
+                    if self.currentChannel == channel {
+                        self.passwordPromptChannel = channel
+                        self.showPasswordPrompt = true
+                    }
+                }
+            } else {
+                self.passwordProtectedChannels.remove(channel)
+                // If we're in this channel and it's no longer protected, clear the key
+                self.channelKeys.removeValue(forKey: channel)
+                self.channelPasswords.removeValue(forKey: channel)
+                self.channelKeyCommitments.removeValue(forKey: channel)
             }
-        } else {
-            passwordProtectedChannels.remove(channel)
-            // If we're in this channel and it's no longer protected, clear the key
-            channelKeys.removeValue(forKey: channel)
-            channelPasswords.removeValue(forKey: channel)
-            channelKeyCommitments.removeValue(forKey: channel)
+
+            // Save updated channel data
+            self.saveChannelData()
         }
-        
-        // Save updated channel data
-        saveChannelData()
-        
     }
     
     func decryptChannelMessage(_ encryptedContent: Data, channel: String, testKey: SymmetricKey? = nil) -> String? {
@@ -1753,69 +1756,70 @@ extension ChatViewModel: BitchatDelegate {
     }
     
     func didReceiveChannelRetentionAnnouncement(_ channel: String, enabled: Bool, creatorID: String?) {
-        
-        // Only process if we're a member of this channel
-        guard joinedChannels.contains(channel) else { return }
-        
-        // Verify the announcement is from the channel owner
-        if let creatorID = creatorID, channelCreators[channel] != creatorID {
-            return
-        }
-        
-        // Update retention status
-        if enabled {
-            retentionEnabledChannels.insert(channel)
-            savedChannels.insert(channel)
-            // Ensure channel is in favorites if not already
-            if !MessageRetentionService.shared.getFavoriteChannels().contains(channel) {
-                _ = MessageRetentionService.shared.toggleFavoriteChannel(channel)
+        DispatchQueue.main.async {
+            // Only process if we're a member of this channel
+            guard self.joinedChannels.contains(channel) else { return }
+            
+            // Verify the announcement is from the channel owner
+            if let creatorID = creatorID, self.channelCreators[channel] != creatorID {
+                return
             }
             
-            // Show system message
-            let systemMessage = BitchatMessage(
-                sender: "system",
-                content: "channel owner enabled message retention for \(channel). all messages will be saved locally.",
-                timestamp: Date(),
-                isRelay: false
-            )
-            if currentChannel == channel {
-                messages.append(systemMessage)
-            } else if var channelMsgs = channelMessages[channel] {
-                channelMsgs.append(systemMessage)
-                channelMessages[channel] = channelMsgs
+            // Update retention status
+            if enabled {
+                self.retentionEnabledChannels.insert(channel)
+                self.savedChannels.insert(channel)
+                // Ensure channel is in favorites if not already
+                if !MessageRetentionService.shared.getFavoriteChannels().contains(channel) {
+                    _ = MessageRetentionService.shared.toggleFavoriteChannel(channel)
+                }
+
+                // Show system message
+                let systemMessage = BitchatMessage(
+                    sender: "system",
+                    content: "channel owner enabled message retention for \(channel). all messages will be saved locally.",
+                    timestamp: Date(),
+                    isRelay: false
+                )
+                if self.currentChannel == channel {
+                    self.messages.append(systemMessage)
+                } else if var channelMsgs = self.channelMessages[channel] {
+                    channelMsgs.append(systemMessage)
+                    self.channelMessages[channel] = channelMsgs
+                } else {
+                    self.channelMessages[channel] = [systemMessage]
+                }
             } else {
-                channelMessages[channel] = [systemMessage]
+                self.retentionEnabledChannels.remove(channel)
+                self.savedChannels.remove(channel)
+
+                // Delete all saved messages for this channel
+                MessageRetentionService.shared.deleteMessagesForChannel(channel)
+                // Remove from favorites if currently set
+                if MessageRetentionService.shared.getFavoriteChannels().contains(channel) {
+                    _ = MessageRetentionService.shared.toggleFavoriteChannel(channel)
+                }
+
+                // Show system message
+                let systemMessage = BitchatMessage(
+                    sender: "system",
+                    content: "channel owner disabled message retention for \(channel). all saved messages have been deleted.",
+                    timestamp: Date(),
+                    isRelay: false
+                )
+                if self.currentChannel == channel {
+                    self.messages.append(systemMessage)
+                } else if var channelMsgs = self.channelMessages[channel] {
+                    channelMsgs.append(systemMessage)
+                    self.channelMessages[channel] = channelMsgs
+                } else {
+                    self.channelMessages[channel] = [systemMessage]
+                }
             }
-        } else {
-            retentionEnabledChannels.remove(channel)
-            savedChannels.remove(channel)
-            
-            // Delete all saved messages for this channel
-            MessageRetentionService.shared.deleteMessagesForChannel(channel)
-            // Remove from favorites if currently set
-            if MessageRetentionService.shared.getFavoriteChannels().contains(channel) {
-                _ = MessageRetentionService.shared.toggleFavoriteChannel(channel)
-            }
-            
-            // Show system message
-            let systemMessage = BitchatMessage(
-                sender: "system",
-                content: "channel owner disabled message retention for \(channel). all saved messages have been deleted.",
-                timestamp: Date(),
-                isRelay: false
-            )
-            if currentChannel == channel {
-                messages.append(systemMessage)
-            } else if var channelMsgs = channelMessages[channel] {
-                channelMsgs.append(systemMessage)
-                channelMessages[channel] = channelMsgs
-            } else {
-                channelMessages[channel] = [systemMessage]
-            }
+
+            // Persist retention status
+            self.userDefaults.set(Array(self.retentionEnabledChannels), forKey: self.retentionEnabledChannelsKey)
         }
-        
-        // Persist retention status
-        userDefaults.set(Array(retentionEnabledChannels), forKey: retentionEnabledChannelsKey)
     }
     
     private func handleCommand(_ command: String) {
@@ -2443,490 +2447,497 @@ extension ChatViewModel: BitchatDelegate {
     }
     
     func didReceiveMessage(_ message: BitchatMessage) {
-        
-        // Check if sender is blocked (for both private and public messages)
-        if let senderPeerID = message.senderPeerID {
-            if isPeerBlocked(senderPeerID) {
-                // Silently ignore messages from blocked users
-                return
+        DispatchQueue.main.async {
+            // Check if sender is blocked (for both private and public messages)
+            if let senderPeerID = message.senderPeerID {
+                if self.isPeerBlocked(senderPeerID) {
+                    // Silently ignore messages from blocked users
+                    return
+                }
+            } else if let peerID = self.getPeerIDForNickname(message.sender) {
+                if self.isPeerBlocked(peerID) {
+                    // Silently ignore messages from blocked users
+                    return
+                }
             }
-        } else if let peerID = getPeerIDForNickname(message.sender) {
-            if isPeerBlocked(peerID) {
-                // Silently ignore messages from blocked users
-                return
-            }
-        }
-        
-        if message.isPrivate {
-            // Handle private message
             
-            // Use the senderPeerID from the message if available
-            let senderPeerID = message.senderPeerID ?? getPeerIDForNickname(message.sender)
-            
-            if let peerID = senderPeerID {
-                // Message from someone else
+            if message.isPrivate {
+                // Handle private message
                 
-                // First check if we need to migrate existing messages from this sender
-                let senderNickname = message.sender
-                if privateChats[peerID] == nil || privateChats[peerID]?.isEmpty == true {
-                    // Check if we have messages from this nickname under a different peer ID
-                    var migratedMessages: [BitchatMessage] = []
-                    var oldPeerIDsToRemove: [String] = []
+                // Use the senderPeerID from the message if available
+                let senderPeerID = message.senderPeerID ?? self.getPeerIDForNickname(message.sender)
+
+                if let peerID = senderPeerID {
+                    // Message from someone else
                     
-                    for (oldPeerID, messages) in privateChats {
-                        if oldPeerID != peerID {
-                            // Check if this chat contains messages with this sender
-                            let isRelevantChat = messages.contains { msg in
-                                (msg.sender == senderNickname && msg.sender != nickname) ||
-                                (msg.sender == nickname && msg.recipientNickname == senderNickname)
-                            }
-                            
-                            if isRelevantChat {
-                                migratedMessages.append(contentsOf: messages)
-                                oldPeerIDsToRemove.append(oldPeerID)
-                            }
-                        }
-                    }
-                    
-                    // Remove old peer ID entries
-                    for oldPeerID in oldPeerIDsToRemove {
-                        privateChats.removeValue(forKey: oldPeerID)
-                        unreadPrivateMessages.remove(oldPeerID)
-                    }
-                    
-                    // Initialize with migrated messages
-                    privateChats[peerID] = migratedMessages
-                }
-                
-                if privateChats[peerID] == nil {
-                    privateChats[peerID] = []
-                }
-                
-                // Fix delivery status for incoming messages
-                var messageToStore = message
-                if message.sender != nickname {
-                    // This is an incoming message - it should NOT have "sending" status
-                    if messageToStore.deliveryStatus == nil || messageToStore.deliveryStatus == .sending {
-                        // Mark it as delivered since we received it
-                        messageToStore.deliveryStatus = .delivered(to: nickname, at: Date())
-                    }
-                }
-                
-                // Check if this is an action that should be converted to system message
-                let isActionMessage = messageToStore.content.hasPrefix("* ") && messageToStore.content.hasSuffix(" *") &&
-                                      (messageToStore.content.contains("🫂") || messageToStore.content.contains("🐟") || 
-                                       messageToStore.content.contains("took a screenshot"))
-                
-                if isActionMessage {
-                    // Convert to system message
-                    messageToStore = BitchatMessage(
-                        id: messageToStore.id,
-                        sender: "system",
-                        content: String(messageToStore.content.dropFirst(2).dropLast(2)), // Remove * * wrapper
-                        timestamp: messageToStore.timestamp,
-                        isRelay: messageToStore.isRelay,
-                        originalSender: messageToStore.originalSender,
-                        isPrivate: messageToStore.isPrivate,
-                        recipientNickname: messageToStore.recipientNickname,
-                        senderPeerID: messageToStore.senderPeerID,
-                        mentions: messageToStore.mentions,
-                        channel: messageToStore.channel,
-                        deliveryStatus: messageToStore.deliveryStatus
-                    )
-                }
-                
-                privateChats[peerID]?.append(messageToStore)
-                // Sort messages by timestamp to ensure proper ordering
-                privateChats[peerID]?.sort { $0.timestamp < $1.timestamp }
-                
-                // Trigger UI update for private chats
-                objectWillChange.send()
-                
-                // Mark as unread if not currently viewing this chat
-                if selectedPrivateChatPeer != peerID {
-                    unreadPrivateMessages.insert(peerID)
-                    
-                } else {
-                    // We're viewing this chat, make sure unread is cleared
-                    unreadPrivateMessages.remove(peerID)
-                    
-                    // Send read receipt immediately since we're viewing the chat
-                    // Send to the current peer ID since peer IDs change between sessions
-                    let receipt = ReadReceipt(
-                        originalMessageID: message.id,
-                        readerID: meshService.myPeerID,
-                        readerNickname: nickname
-                    )
-                    meshService.sendReadReceipt(receipt, to: peerID)
-                    
-                    // Also check if there are other unread messages from this peer
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                        self?.markPrivateMessagesAsRead(from: peerID)
-                    }
-                }
-            } else if message.sender == nickname {
-                // Our own message that was echoed back - ignore it since we already added it locally
-            }
-        } else if let channel = message.channel {
-            // Channel message
-            
-            // Only process channel messages if we've joined this channel
-            if joinedChannels.contains(channel) {
-                // Prepare the message to add (might be updated if decryption succeeds)
-                var messageToAdd = message
-                
-                // Check if this is an encrypted message and we don't have the key
-                if message.isEncrypted && channelKeys[channel] == nil {
-                    // Mark channel as password protected if not already
-                    let wasNewlyDiscovered = !passwordProtectedChannels.contains(channel)
-                    if wasNewlyDiscovered {
-                        passwordProtectedChannels.insert(channel)
-                        saveChannelData()
-                        
-                        // Add a system message to indicate the channel is password protected (only once)
-                        let systemMessage = BitchatMessage(
-                            sender: "system",
-                            content: "channel \(channel) is password protected. you need the password to read messages.",
-                            timestamp: Date(),
-                            isRelay: false
-                        )
-                        if channelMessages[channel] == nil {
-                            channelMessages[channel] = []
-                        }
-                        channelMessages[channel]?.append(systemMessage)
-                    }
-                    
-                    // If we're currently viewing this channel, prompt for password
-                    if currentChannel == channel {
-                        passwordPromptChannel = channel
-                        showPasswordPrompt = true
-                    }
-                } else if message.isEncrypted && channelKeys[channel] != nil && message.content == "[Encrypted message - password required]" {
-                    // We have a key but the message shows as encrypted - try to decrypt it again
-                    
-                    // Check if this is the first encrypted message in the channel (password verification opportunity)
-                    let isFirstEncryptedMessage = channelMessages[channel]?.filter { $0.isEncrypted }.isEmpty ?? true
-                    
-                    if let encryptedData = message.encryptedContent {
-                        if let decryptedContent = decryptChannelMessage(encryptedData, channel: channel) {
-                            // Successfully decrypted - update the message content
-                            
-                            if isFirstEncryptedMessage {
-                                
-                                // Add success message
-                                let verifiedMsg = BitchatMessage(
-                                    sender: "system",
-                                    content: "password verified successfully for channel \(channel).",
-                                    timestamp: Date(),
-                                    isRelay: false
-                                )
-                                messages.append(verifiedMsg)
-                            }
-                            
-                            // Create a new message with decrypted content
-                            let decryptedMessage = BitchatMessage(
-                                sender: message.sender,
-                                content: decryptedContent,
-                                timestamp: message.timestamp,
-                                isRelay: message.isRelay,
-                                originalSender: message.originalSender,
-                                isPrivate: message.isPrivate,
-                                recipientNickname: message.recipientNickname,
-                                senderPeerID: message.senderPeerID,
-                                mentions: message.mentions,
-                                channel: message.channel,
-                                encryptedContent: message.encryptedContent,
-                                isEncrypted: message.isEncrypted
-                            )
-                            
-                            // Update the message we'll add
-                            messageToAdd = decryptedMessage
-                        } else {
-                            // Decryption really failed - wrong password
-                            
-                            // Clear the wrong password
-                            channelKeys.removeValue(forKey: channel)
-                            channelPasswords.removeValue(forKey: channel)
-                            
-                            // If this was the first encrypted message, we need to kick the user out
-                            if isFirstEncryptedMessage {
-                                
-                                // Leave the channel
-                                joinedChannels.remove(channel)
-                                saveJoinedChannels()
-                                
-                                // Clear channel data
-                                channelMessages.removeValue(forKey: channel)
-                                channelMembers.removeValue(forKey: channel)
-                                unreadChannelMessages.removeValue(forKey: channel)
-                                
-                                // If we're currently in this channel, exit to main
-                                if currentChannel == channel {
-                                    currentChannel = nil
+                    // First check if we need to migrate existing messages from this sender
+                    let senderNickname = message.sender
+                    if self.privateChats[peerID] == nil || self.privateChats[peerID]?.isEmpty == true {
+                        // Check if we have messages from this nickname under a different peer ID
+                        var migratedMessages: [BitchatMessage] = []
+                        var oldPeerIDsToRemove: [String] = []
+
+                        for (oldPeerID, messages) in self.privateChats {
+                            if oldPeerID != peerID {
+                                // Check if this chat contains messages with this sender
+                                let isRelevantChat = messages.contains { msg in
+                                    (msg.sender == senderNickname && msg.sender != self.nickname) ||
+                                    (msg.sender == self.nickname && msg.recipientNickname == senderNickname)
                                 }
-                                
-                                // Add error message
-                                let errorMsg = BitchatMessage(
-                                    sender: "system",
-                                    content: "wrong password for channel \(channel). you have been removed from the channel.",
-                                    timestamp: Date(),
-                                    isRelay: false
-                                )
-                                messages.append(errorMsg)
-                                
-                                // Don't show password prompt - user needs to rejoin
-                                return
+
+                                if isRelevantChat {
+                                    migratedMessages.append(contentsOf: messages)
+                                    oldPeerIDsToRemove.append(oldPeerID)
+                                }
                             }
+                        }
+
+                        // Remove old peer ID entries
+                        for oldPeerID in oldPeerIDsToRemove {
+                            self.privateChats.removeValue(forKey: oldPeerID)
+                            self.unreadPrivateMessages.remove(oldPeerID)
+                        }
+
+                        // Initialize with migrated messages
+                        self.privateChats[peerID] = migratedMessages
+                    }
+                    
+                    if self.privateChats[peerID] == nil {
+                        self.privateChats[peerID] = []
+                    }
+                    
+                    // Fix delivery status for incoming messages
+                    var messageToStore = message
+                    if message.sender != self.nickname {
+                        // This is an incoming message - it should NOT have "sending" status
+                        if messageToStore.deliveryStatus == nil || messageToStore.deliveryStatus == .sending {
+                            // Mark it as delivered since we received it
+                            messageToStore.deliveryStatus = .delivered(to: self.nickname, at: Date())
+                        }
+                    }
+                    
+                    // Check if this is an action that should be converted to system message
+                    let isActionMessage = messageToStore.content.hasPrefix("* ") && messageToStore.content.hasSuffix(" *") &&
+                    (messageToStore.content.contains("🫂") || messageToStore.content.contains("🐟") ||
+                     messageToStore.content.contains("took a screenshot"))
+                    
+                    if isActionMessage {
+                        // Convert to system message
+                        messageToStore = BitchatMessage(
+                            id: messageToStore.id,
+                            sender: "system",
+                            content: String(messageToStore.content.dropFirst(2).dropLast(2)), // Remove * * wrapper
+                            timestamp: messageToStore.timestamp,
+                            isRelay: messageToStore.isRelay,
+                            originalSender: messageToStore.originalSender,
+                            isPrivate: messageToStore.isPrivate,
+                            recipientNickname: messageToStore.recipientNickname,
+                            senderPeerID: messageToStore.senderPeerID,
+                            mentions: messageToStore.mentions,
+                            channel: messageToStore.channel,
+                            deliveryStatus: messageToStore.deliveryStatus
+                        )
+                    }
+                    
+                    self.privateChats[peerID]?.append(messageToStore)
+                    // Sort messages by timestamp to ensure proper ordering
+                    self.privateChats[peerID]?.sort { $0.timestamp < $1.timestamp }
+
+                    // Trigger UI update for private chats
+                    self.objectWillChange.send()
+                    
+                    // Mark as unread if not currently viewing this chat
+                    if self.selectedPrivateChatPeer != peerID {
+                        self.unreadPrivateMessages.insert(peerID)
+
+                    } else {
+                        // We're viewing this chat, make sure unread is cleared
+                        self.unreadPrivateMessages.remove(peerID)
+
+                        // Send read receipt immediately since we're viewing the chat
+                        // Send to the current peer ID since peer IDs change between sessions
+                        let receipt = ReadReceipt(
+                            originalMessageID: message.id,
+                            readerID: self.meshService.myPeerID,
+                            readerNickname: self.nickname
+                        )
+                        self.meshService.sendReadReceipt(receipt, to: peerID)
+
+                        // Also check if there are other unread messages from this peer
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                            self?.markPrivateMessagesAsRead(from: peerID)
+                        }
+                    }
+                } else if message.sender == self.nickname {
+                    // Our own message that was echoed back - ignore it since we already added it locally
+                }
+            } else if let channel = message.channel {
+                // Channel message
+
+                // Only process channel messages if we've joined this channel
+                if self.joinedChannels.contains(channel) {
+                    // Prepare the message to add (might be updated if decryption succeeds)
+                    var messageToAdd = message
+                    
+                    // Check if this is an encrypted message and we don't have the key
+                    if message.isEncrypted && self.channelKeys[channel] == nil {
+                        // Mark channel as password protected if not already
+                        let wasNewlyDiscovered = !self.passwordProtectedChannels.contains(channel)
+                        if wasNewlyDiscovered {
+                            self.passwordProtectedChannels.insert(channel)
+                            self.saveChannelData()
                             
-                            // Add system message for subsequent failures
+                            // Add a system message to indicate the channel is password protected (only once)
                             let systemMessage = BitchatMessage(
                                 sender: "system",
-                                content: "wrong password for channel \(channel). please enter the correct password.",
+                                content: "channel \(channel) is password protected. you need the password to read messages.",
                                 timestamp: Date(),
                                 isRelay: false
                             )
-                            messages.append(systemMessage)
-                            
-                            // Show password prompt again
-                            if currentChannel == channel {
-                                passwordPromptChannel = channel
-                                showPasswordPrompt = true
+                            if self.channelMessages[channel] == nil {
+                                self.channelMessages[channel] = []
+                            }
+                            self.channelMessages[channel]?.append(systemMessage)
+                        }
+
+                        // If we're currently viewing this channel, prompt for password
+                        if self.currentChannel == channel {
+                            self.passwordPromptChannel = channel
+                            self.showPasswordPrompt = true
+                        }
+                    } else if message.isEncrypted && self.channelKeys[channel] != nil && message.content == "[Encrypted message - password required]" {
+                        // We have a key but the message shows as encrypted - try to decrypt it again
+
+                        // Check if this is the first encrypted message in the channel (password verification opportunity)
+                        let isFirstEncryptedMessage = self.channelMessages[channel]?.filter { $0.isEncrypted }.isEmpty ?? true
+
+                        if let encryptedData = message.encryptedContent {
+                            if let decryptedContent = self.decryptChannelMessage(encryptedData, channel: channel) {
+                                // Successfully decrypted - update the message content
+                                
+                                if isFirstEncryptedMessage {
+
+                                    // Add success message
+                                    let verifiedMsg = BitchatMessage(
+                                        sender: "system",
+                                        content: "password verified successfully for channel \(channel).",
+                                        timestamp: Date(),
+                                        isRelay: false
+                                    )
+                                    self.messages.append(verifiedMsg)
+                                }
+
+                                // Create a new message with decrypted content
+                                let decryptedMessage = BitchatMessage(
+                                    sender: message.sender,
+                                    content: decryptedContent,
+                                    timestamp: message.timestamp,
+                                    isRelay: message.isRelay,
+                                    originalSender: message.originalSender,
+                                    isPrivate: message.isPrivate,
+                                    recipientNickname: message.recipientNickname,
+                                    senderPeerID: message.senderPeerID,
+                                    mentions: message.mentions,
+                                    channel: message.channel,
+                                    encryptedContent: message.encryptedContent,
+                                    isEncrypted: message.isEncrypted
+                                )
+                                
+                                // Update the message we'll add
+                                messageToAdd = decryptedMessage
+                            } else {
+                                // Decryption really failed - wrong password
+                                
+                                // Clear the wrong password
+                                self.channelKeys.removeValue(forKey: channel)
+                                self.channelPasswords.removeValue(forKey: channel)
+                                
+                                // If this was the first encrypted message, we need to kick the user out
+                                if isFirstEncryptedMessage {
+
+                                    // Leave the channel
+                                    self.joinedChannels.remove(channel)
+                                    self.saveJoinedChannels()
+
+                                    // Clear channel data
+                                    self.channelMessages.removeValue(forKey: channel)
+                                    self.channelMembers.removeValue(forKey: channel)
+                                    self.unreadChannelMessages.removeValue(forKey: channel)
+
+                                    // If we're currently in this channel, exit to main
+                                    if self.currentChannel == channel {
+                                        self.currentChannel = nil
+                                    }
+
+                                    // Add error message
+                                    let errorMsg = BitchatMessage(
+                                        sender: "system",
+                                        content: "wrong password for channel \(channel). you have been removed from the channel.",
+                                        timestamp: Date(),
+                                        isRelay: false
+                                    )
+                                    self.messages.append(errorMsg)
+
+                                    // Don't show password prompt - user needs to rejoin
+                                    return
+                                }
+                                
+                                // Add system message for subsequent failures
+                                let systemMessage = BitchatMessage(
+                                    sender: "system",
+                                    content: "wrong password for channel \(channel). please enter the correct password.",
+                                    timestamp: Date(),
+                                    isRelay: false
+                                )
+                                self.messages.append(systemMessage)
+                                
+                                // Show password prompt again
+                                if self.currentChannel == channel {
+                                    self.passwordPromptChannel = channel
+                                    self.showPasswordPrompt = true
+                                }
                             }
                         }
                     }
+
+                    // Check if this is an action that should be converted to system message
+                    let isActionMessage = messageToAdd.content.hasPrefix("* ") && messageToAdd.content.hasSuffix(" *") &&
+                    (messageToAdd.content.contains("🫂") || messageToAdd.content.contains("🐟") ||
+                     messageToAdd.content.contains("took a screenshot"))
+
+                    let finalMessage: BitchatMessage
+                    if isActionMessage {
+                        // Convert to system message
+                        finalMessage = BitchatMessage(
+                            sender: "system",
+                            content: String(messageToAdd.content.dropFirst(2).dropLast(2)), // Remove * * wrapper
+                            timestamp: messageToAdd.timestamp,
+                            isRelay: messageToAdd.isRelay,
+                            originalSender: messageToAdd.originalSender,
+                            isPrivate: false,
+                            recipientNickname: messageToAdd.recipientNickname,
+                            senderPeerID: messageToAdd.senderPeerID,
+                            mentions: messageToAdd.mentions,
+                            channel: messageToAdd.channel
+                        )
+                    } else {
+                        finalMessage = messageToAdd
+                    }
+
+                    // Add to channel messages (using potentially decrypted version)
+                    if self.channelMessages[channel] == nil {
+                        self.channelMessages[channel] = []
+                    }
+                    self.channelMessages[channel]?.append(finalMessage)
+                    self.channelMessages[channel]?.sort { $0.timestamp < $1.timestamp }
+
+                    // Save message if channel has retention enabled
+                    if self.retentionEnabledChannels.contains(channel) {
+                        MessageRetentionService.shared.saveMessage(messageToAdd, forChannel: channel)
+                    }
+
+                    // Track channel members - only track the sender as a member
+                    if self.channelMembers[channel] == nil {
+                        self.channelMembers[channel] = Set()
+                    }
+                    if let senderPeerID = message.senderPeerID {
+                        self.channelMembers[channel]?.insert(senderPeerID)
+                    } else {
+                    }
+
+                    // Update unread count if not currently viewing this channel
+                    if self.currentChannel != channel {
+                        self.unreadChannelMessages[channel] = (self.unreadChannelMessages[channel] ?? 0) + 1
+                    }
+                } else {
+                    // We're not in this channel, ignore the message
                 }
+            } else {
+                // Regular public message (main chat)
                 
                 // Check if this is an action that should be converted to system message
-                let isActionMessage = messageToAdd.content.hasPrefix("* ") && messageToAdd.content.hasSuffix(" *") &&
-                                      (messageToAdd.content.contains("🫂") || messageToAdd.content.contains("🐟") || 
-                                       messageToAdd.content.contains("took a screenshot"))
+                let isActionMessage = message.content.hasPrefix("* ") && message.content.hasSuffix(" *") &&
+                (message.content.contains("🫂") || message.content.contains("🐟") ||
+                 message.content.contains("took a screenshot"))
                 
-                let finalMessage: BitchatMessage
                 if isActionMessage {
                     // Convert to system message
-                    finalMessage = BitchatMessage(
+                    let systemMessage = BitchatMessage(
                         sender: "system",
-                        content: String(messageToAdd.content.dropFirst(2).dropLast(2)), // Remove * * wrapper
-                        timestamp: messageToAdd.timestamp,
-                        isRelay: messageToAdd.isRelay,
-                        originalSender: messageToAdd.originalSender,
+                        content: String(message.content.dropFirst(2).dropLast(2)), // Remove * * wrapper
+                        timestamp: message.timestamp,
+                        isRelay: message.isRelay,
+                        originalSender: message.originalSender,
                         isPrivate: false,
-                        recipientNickname: messageToAdd.recipientNickname,
-                        senderPeerID: messageToAdd.senderPeerID,
-                        mentions: messageToAdd.mentions,
-                        channel: messageToAdd.channel
+                        recipientNickname: message.recipientNickname,
+                        senderPeerID: message.senderPeerID,
+                        mentions: message.mentions,
+                        channel: message.channel
                     )
+                    self.messages.append(systemMessage)
                 } else {
-                    finalMessage = messageToAdd
+                    self.messages.append(message)
                 }
-                
-                // Add to channel messages (using potentially decrypted version)
-                if channelMessages[channel] == nil {
-                    channelMessages[channel] = []
-                }
-                channelMessages[channel]?.append(finalMessage)
-                channelMessages[channel]?.sort { $0.timestamp < $1.timestamp }
-                
-                // Save message if channel has retention enabled
-                if retentionEnabledChannels.contains(channel) {
-                    MessageRetentionService.shared.saveMessage(messageToAdd, forChannel: channel)
-                }
-                
-                // Track channel members - only track the sender as a member
-                if channelMembers[channel] == nil {
-                    channelMembers[channel] = Set()
-                }
-                if let senderPeerID = message.senderPeerID {
-                    channelMembers[channel]?.insert(senderPeerID)
-                } else {
-                }
-                
-                // Update unread count if not currently viewing this channel
-                if currentChannel != channel {
-                    unreadChannelMessages[channel] = (unreadChannelMessages[channel] ?? 0) + 1
-                }
-            } else {
-                // We're not in this channel, ignore the message
+                // Sort messages by timestamp to ensure proper ordering
+                self.messages.sort { $0.timestamp < $1.timestamp }
             }
-        } else {
-            // Regular public message (main chat)
-            
-            // Check if this is an action that should be converted to system message
-            let isActionMessage = message.content.hasPrefix("* ") && message.content.hasSuffix(" *") &&
-                                  (message.content.contains("🫂") || message.content.contains("🐟") || 
-                                   message.content.contains("took a screenshot"))
-            
-            if isActionMessage {
-                // Convert to system message
-                let systemMessage = BitchatMessage(
-                    sender: "system",
-                    content: String(message.content.dropFirst(2).dropLast(2)), // Remove * * wrapper
-                    timestamp: message.timestamp,
-                    isRelay: message.isRelay,
-                    originalSender: message.originalSender,
-                    isPrivate: false,
-                    recipientNickname: message.recipientNickname,
-                    senderPeerID: message.senderPeerID,
-                    mentions: message.mentions,
-                    channel: message.channel
-                )
-                messages.append(systemMessage)
-            } else {
-                messages.append(message)
+
+            // Check if we're mentioned
+            let isMentioned = message.mentions?.contains(self.nickname) ?? false
+
+            // Send notifications for mentions and private messages when app is in background
+            if isMentioned && message.sender != self.nickname {
+                NotificationService.shared.sendMentionNotification(from: message.sender, message: message.content)
+            } else if message.isPrivate && message.sender != self.nickname {
+                NotificationService.shared.sendPrivateMessageNotification(from: message.sender, message: message.content)
             }
-            // Sort messages by timestamp to ensure proper ordering
-            messages.sort { $0.timestamp < $1.timestamp }
-        }
-        
-        // Check if we're mentioned
-        let isMentioned = message.mentions?.contains(nickname) ?? false
-        
-        // Send notifications for mentions and private messages when app is in background
-        if isMentioned && message.sender != nickname {
-            NotificationService.shared.sendMentionNotification(from: message.sender, message: message.content)
-        } else if message.isPrivate && message.sender != nickname {
-            NotificationService.shared.sendPrivateMessageNotification(from: message.sender, message: message.content)
-        }
-        
-        #if os(iOS)
-        // Haptic feedback for iOS only
-        
-        // Check if this is a hug message directed at the user
-        let isHugForMe = message.content.contains("🫂") && 
-                         (message.content.contains("hugs \(nickname)") ||
-                          message.content.contains("hugs you"))
-        
-        // Check if this is a slap message directed at the user
-        let isSlapForMe = message.content.contains("🐟") && 
-                          (message.content.contains("slaps \(nickname) around") ||
-                           message.content.contains("slaps you around"))
-        
-        if isHugForMe && message.sender != nickname {
-            // Long warm haptic for hugs - continuous gentle vibration
-            let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
-            impactFeedback.prepare()
-            
-            // Create a warm, sustained haptic pattern
-            for i in 0..<8 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 0.15) {
+
+#if os(iOS)
+            // Haptic feedback for iOS only
+
+            // Check if this is a hug message directed at the user
+            let isHugForMe = message.content.contains("🫂") &&
+            (message.content.contains("hugs \(self.nickname)") ||
+             message.content.contains("hugs you"))
+
+            // Check if this is a slap message directed at the user
+            let isSlapForMe = message.content.contains("🐟") &&
+            (message.content.contains("slaps \(self.nickname) around") ||
+             message.content.contains("slaps you around"))
+
+            if isHugForMe && message.sender != self.nickname {
+                // Long warm haptic for hugs - continuous gentle vibration
+                let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
+                impactFeedback.prepare()
+                
+                // Create a warm, sustained haptic pattern
+                for i in 0..<8 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 0.15) {
+                        impactFeedback.impactOccurred()
+                    }
+                }
+                
+                // Add a final stronger pulse
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                    let strongFeedback = UIImpactFeedbackGenerator(style: .heavy)
+                    strongFeedback.prepare()
+                    strongFeedback.impactOccurred()
+                }
+            } else if isSlapForMe && message.sender != self.nickname {
+                // Very harsh, fast, strong haptic for slaps - multiple sharp impacts
+                let impactFeedback = UIImpactFeedbackGenerator(style: .heavy)
+                impactFeedback.prepare()
+                
+                // Rapid-fire heavy impacts to simulate a hard slap
+                impactFeedback.impactOccurred()
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
                     impactFeedback.impactOccurred()
                 }
-            }
-            
-            // Add a final stronger pulse
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                let strongFeedback = UIImpactFeedbackGenerator(style: .heavy)
-                strongFeedback.prepare()
-                strongFeedback.impactOccurred()
-            }
-        } else if isSlapForMe && message.sender != nickname {
-            // Very harsh, fast, strong haptic for slaps - multiple sharp impacts
-            let impactFeedback = UIImpactFeedbackGenerator(style: .heavy)
-            impactFeedback.prepare()
-            
-            // Rapid-fire heavy impacts to simulate a hard slap
-            impactFeedback.impactOccurred()
-            
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+                
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
+                    impactFeedback.impactOccurred()
+                }
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.09) {
+                    impactFeedback.impactOccurred()
+                }
+
+                // Final extra heavy impact
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    let finalImpact = UIImpactFeedbackGenerator(style: .heavy)
+                    finalImpact.prepare()
+                    finalImpact.impactOccurred()
+                }
+            } else if isMentioned && message.sender != self.nickname {
+                // Very prominent haptic for @mentions - triple tap with heavy impact
+                let impactFeedback = UIImpactFeedbackGenerator(style: .heavy)
+                impactFeedback.prepare()
+                impactFeedback.impactOccurred()
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    impactFeedback.impactOccurred()
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    impactFeedback.impactOccurred()
+                }
+            } else if message.isPrivate && message.sender != self.nickname {
+                // Heavy haptic for private messages - more pronounced
+                let impactFeedback = UIImpactFeedbackGenerator(style: .heavy)
+                impactFeedback.prepare()
+                impactFeedback.impactOccurred()
+
+                // Double tap for extra emphasis
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    impactFeedback.impactOccurred()
+                }
+            } else if message.sender != self.nickname {
+                // Light haptic for public messages from others
+                let impactFeedback = UIImpactFeedbackGenerator(style: .light)
                 impactFeedback.impactOccurred()
             }
-            
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
-                impactFeedback.impactOccurred()
-            }
-            
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.09) {
-                impactFeedback.impactOccurred()
-            }
-            
-            // Final extra heavy impact
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                let finalImpact = UIImpactFeedbackGenerator(style: .heavy)
-                finalImpact.prepare()
-                finalImpact.impactOccurred()
-            }
-        } else if isMentioned && message.sender != nickname {
-            // Very prominent haptic for @mentions - triple tap with heavy impact
-            let impactFeedback = UIImpactFeedbackGenerator(style: .heavy)
-            impactFeedback.prepare()
-            impactFeedback.impactOccurred()
-            
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                impactFeedback.impactOccurred()
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                impactFeedback.impactOccurred()
-            }
-        } else if message.isPrivate && message.sender != nickname {
-            // Heavy haptic for private messages - more pronounced
-            let impactFeedback = UIImpactFeedbackGenerator(style: .heavy)
-            impactFeedback.prepare()
-            impactFeedback.impactOccurred()
-            
-            // Double tap for extra emphasis
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                impactFeedback.impactOccurred()
-            }
-        } else if message.sender != nickname {
-            // Light haptic for public messages from others
-            let impactFeedback = UIImpactFeedbackGenerator(style: .light)
-            impactFeedback.impactOccurred()
+#endif
         }
-        #endif
     }
     
     func didConnectToPeer(_ peerID: String) {
-        isConnected = true
-        let systemMessage = BitchatMessage(
-            sender: "system",
-            content: "\(peerID) connected",
-            timestamp: Date(),
-            isRelay: false,
-            originalSender: nil
-        )
-        messages.append(systemMessage)
-        
-        // Force UI update
-        objectWillChange.send()
+        DispatchQueue.main.async {
+            self.isConnected = true
+            let systemMessage = BitchatMessage(
+                sender: "system",
+                content: "\(peerID) connected",
+                timestamp: Date(),
+                isRelay: false,
+                originalSender: nil
+            )
+            self.messages.append(systemMessage)
+
+            // Force UI update
+            self.objectWillChange.send()
+        }
     }
     
     func didDisconnectFromPeer(_ peerID: String) {
-        let systemMessage = BitchatMessage(
-            sender: "system",
-            content: "\(peerID) disconnected",
-            timestamp: Date(),
-            isRelay: false,
-            originalSender: nil
-        )
-        messages.append(systemMessage)
-        
-        // Force UI update
-        objectWillChange.send()
+        DispatchQueue.main.async {
+            let systemMessage = BitchatMessage(
+                sender: "system",
+                content: "\(peerID) disconnected",
+                timestamp: Date(),
+                isRelay: false,
+                originalSender: nil
+            )
+            self.messages.append(systemMessage)
+
+            // Force UI update
+            self.objectWillChange.send()
+        }
     }
     
     func didUpdatePeerList(_ peers: [String]) {
-        // print("[DEBUG] Updating peer list: \(peers.count) peers: \(peers)")
-        connectedPeers = peers
-        isConnected = !peers.isEmpty
-        
-        // Clean up channel members who disconnected
-        for (channel, memberIDs) in channelMembers {
-            // Remove disconnected peers from channel members
-            let activeMembers = memberIDs.filter { memberID in
-                memberID == meshService.myPeerID || peers.contains(memberID)
+        DispatchQueue.main.async {
+            // print("[DEBUG] Updating peer list: \(peers.count) peers: \(peers)")
+            self.connectedPeers = peers
+            self.isConnected = !peers.isEmpty
+
+            // Clean up channel members who disconnected
+            for (channel, memberIDs) in self.channelMembers {
+                // Remove disconnected peers from channel members
+                let activeMembers = memberIDs.filter { memberID in
+                    memberID == self.meshService.myPeerID || peers.contains(memberID)
+                }
+                if activeMembers != memberIDs {
+                    self.channelMembers[channel] = activeMembers
+                }
             }
-            if activeMembers != memberIDs {
-                channelMembers[channel] = activeMembers
+
+            // Force UI update
+            self.objectWillChange.send()
+
+            // If we're in a private chat with someone who disconnected, exit the chat
+            if let currentChatPeer = self.selectedPrivateChatPeer,
+               !peers.contains(currentChatPeer) {
+                self.endPrivateChat()
             }
-        }
-        
-        // Force UI update
-        objectWillChange.send()
-        
-        // If we're in a private chat with someone who disconnected, exit the chat
-        if let currentChatPeer = selectedPrivateChatPeer,
-           !peers.contains(currentChatPeer) {
-            endPrivateChat()
         }
     }
     
@@ -2957,17 +2968,23 @@ extension ChatViewModel: BitchatDelegate {
     }
     
     func didReceiveDeliveryAck(_ ack: DeliveryAck) {
-        // Find the message and update its delivery status
-        updateMessageDeliveryStatus(ack.originalMessageID, status: .delivered(to: ack.recipientNickname, at: ack.timestamp))
+        DispatchQueue.main.async {
+            // Find the message and update its delivery status
+            self.updateMessageDeliveryStatus(ack.originalMessageID, status: .delivered(to: ack.recipientNickname, at: ack.timestamp))
+        }
     }
     
     func didReceiveReadReceipt(_ receipt: ReadReceipt) {
-        // Find the message and update its read status
-        updateMessageDeliveryStatus(receipt.originalMessageID, status: .read(by: receipt.readerNickname, at: receipt.timestamp))
+        DispatchQueue.main.async {
+            // Find the message and update its read status
+            self.updateMessageDeliveryStatus(receipt.originalMessageID, status: .read(by: receipt.readerNickname, at: receipt.timestamp))
+        }
     }
     
     func didUpdateMessageDeliveryStatus(_ messageID: String, status: DeliveryStatus) {
-        updateMessageDeliveryStatus(messageID, status: status)
+        DispatchQueue.main.async {
+            self.updateMessageDeliveryStatus(messageID, status: status)
+        }
     }
     
     private func updateMessageDeliveryStatus(_ messageID: String, status: DeliveryStatus) {
