@@ -57,6 +57,7 @@ targets:
       ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
       ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS: YES
       CODE_SIGN_ENTITLEMENTS: bitchat/bitchat.entitlements
+      SWIFT_OBJC_BRIDGING_HEADER: bitchat/bitchat-Bridging-Header.h
     dependencies:
       - target: bitchatShareExtension
         embed: true
@@ -66,6 +67,7 @@ targets:
     platform: macOS
     sources: 
       - bitchat
+      - bitchat/cpp
     resources:
       - bitchat/Assets.xcassets
     info:
@@ -94,6 +96,7 @@ targets:
       ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
       ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS: YES
       CODE_SIGN_ENTITLEMENTS: bitchat/bitchat-macOS.entitlements
+      SWIFT_OBJC_BRIDGING_HEADER: bitchat/bitchat-Bridging-Header.h
         
   bitchatShareExtension:
     type: app-extension

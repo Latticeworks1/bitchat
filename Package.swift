@@ -26,5 +26,11 @@ let package = Package(
                 "LaunchScreen.storyboard"
             ]
         ),
+        .testTarget(
+            name: "bitchatTests",
+            dependencies: ["bitchat"],
+            path: "bitchatTests",
+            exclude: ["Info.plist"]
+        )
     ]
 )
