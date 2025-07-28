@@ -1,7 +1,13 @@
 #include "Arduino.h"
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLEScan.h>
 #include <vector>
-#include <string>
-#include <cstdint>
+
+// =================================================================
+// Bitchat Protocol Definitions
+// =================================================================
 
 namespace Bitchat {
 
@@ -54,65 +60,172 @@ struct BitchatPacket {
 
 } // namespace Bitchat
 
+// =================================================================
+// BLE Mesh Service
+// =================================================================
 
-class BLEMeshService {
-public:
-    BLEMeshService();
-    void begin(const std::string& deviceName);
-    void update();
-    void sendBroadcast(const std::string& message);
-    void setReceiveCallback(void (*callback)(const std::string& message, int rssi));
+#define SERVICE_UUID        "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHARACTERISTIC_UUID "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 
-private:
-    void (*receiveCallback)(const std::string& message, int rssi);
-    std::string deviceName;
+class BLEMeshService; // Forward declaration
+
+class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
+    void onResult(BLEAdvertisedDevice advertisedDevice);
 };
 
-BLEMeshService::BLEMeshService() : receiveCallback(nullptr) {}
+class BLEMeshService : public BLEServerCallbacks, public BLEClientCallbacks {
+public:
+    BLEMeshService();
+    void begin(const char* deviceName);
+    void update();
+    void sendBroadcast(const char* message, size_t length);
+    void setReceiveCallback(void (*callback)(const char* message, size_t length, int rssi));
+    bool isClientConnected(BLEAddress address);
+    void addClient(BLEClient* client);
 
-void BLEMeshService::begin(const std::string& deviceName) {
-    this->deviceName = deviceName;
-    Serial.printf("BLE Mesh Service started with device name: %s\n", deviceName.c_str());
-}
+private:
+    void onConnect(BLEServer* pServer) override;
+    void onDisconnect(BLEServer* pServer) override;
+    void onConnect(BLEClient* pClient) override;
+    void onDisconnect(BLEClient* pClient) override;
 
-void BLEMeshService::update() {
-    if (millis() % 15000 == 0) {
-        if (receiveCallback) {
-            Bitchat::BitchatPacket packet;
-            packet.version = Bitchat::Constants::PROTOCOL_VERSION;
-            packet.type = (uint8_t)Bitchat::MessageType::MESSAGE;
-            packet.ttl = 10;
-            packet.timestamp = millis();
-            packet.flags = 0;
-            packet.payloadLength = 12;
-            memcpy(packet.senderID, "sender", 7);
-            memcpy(packet.payload, "Hello World!", 12);
+    void (*receiveCallback)(const char* message, size_t length, int rssi);
+    const char* deviceName;
+    BLEServer* pServer = NULL;
+    BLEScan* pScan = NULL;
+    std::vector<BLEClient*> clients;
+    std::vector<uint64_t> seenPacketHashes;
+};
 
-            std::string msg((char*)&packet, sizeof(packet));
-            receiveCallback(msg, -50);
+MyAdvertisedDeviceCallbacks* advertisedDeviceCallbacks;
+BLEMeshService* meshServiceInstance;
+
+void MyAdvertisedDeviceCallbacks::onResult(BLEAdvertisedDevice advertisedDevice) {
+    if (advertisedDevice.haveServiceUUID() && advertisedDevice.getServiceUUID().equals(BLEUUID(SERVICE_UUID))) {
+        if (!meshServiceInstance->isClientConnected(advertisedDevice.getAddress())) {
+            advertisedDevice.getScan()->stop();
+            BLEClient* pClient = BLEDevice::createClient();
+            pClient->setCallbacks(meshServiceInstance);
+            pClient->connect(&advertisedDevice);
+            meshServiceInstance->addClient(pClient);
         }
     }
 }
 
-void BLEMeshService::sendBroadcast(const std::string& message) {
-    Serial.printf("Broadcasting message of size %d\n", message.length());
+
+BLEMeshService::BLEMeshService() : receiveCallback(nullptr) {
+    meshServiceInstance = this;
 }
 
-void BLEMeshService::setReceiveCallback(void (*callback)(const std::string& message, int rssi)) {
+void BLEMeshService::begin(const char* deviceName) {
+    this->deviceName = deviceName;
+    BLEDevice::init(deviceName);
+    pServer = BLEDevice::createServer();
+    pServer->setCallbacks(this);
+    BLEService *pService = pServer->createService(SERVICE_UUID);
+    pService->createCharacteristic(
+        CHARACTERISTIC_UUID,
+        BLECharacteristic::PROPERTY_READ |
+        BLECharacteristic::PROPERTY_WRITE
+    );
+    pService->start();
+    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+    pAdvertising->addServiceUUID(SERVICE_UUID);
+    pAdvertising->setScanResponse(true);
+    pAdvertising->setMinPreferred(0x06);  // functions that help with iPhone connections issue
+    pAdvertising->setMinPreferred(0x12);
+    BLEDevice::startAdvertising();
+
+    pScan = BLEDevice::getScan();
+    advertisedDeviceCallbacks = new MyAdvertisedDeviceCallbacks();
+    pScan->setAdvertisedDeviceCallbacks(advertisedDeviceCallbacks);
+    pScan->setActiveScan(true);
+    pScan->start(5, false);
+}
+
+void BLEMeshService::update() {
+    if (!pScan->isScanning()) {
+        pScan->start(5, false);
+    }
+}
+
+void BLEMeshService::sendBroadcast(const char* message, size_t length) {
+    Bitchat::BitchatPacket* packet = (Bitchat::BitchatPacket*)message;
+    uint64_t hash = 0;
+    for(size_t i = 0; i < sizeof(packet->senderID); ++i) hash = (hash << 8) | packet->senderID[i];
+    for(size_t i = 0; i < sizeof(packet->timestamp); ++i) hash = (hash << 8) | ((uint8_t*)&packet->timestamp)[i];
+
+    for(auto seenHash : seenPacketHashes) {
+        if (seenHash == hash) return;
+    }
+    seenPacketHashes.push_back(hash);
+    if (seenPacketHashes.size() > 100) {
+        seenPacketHashes.erase(seenPacketHashes.begin());
+    }
+
+    for (auto client : clients) {
+        if (client->isConnected()) {
+            BLERemoteService* pRemoteService = client->getService(SERVICE_UUID);
+            if (pRemoteService != nullptr) {
+                BLERemoteCharacteristic* pRemoteCharacteristic = pRemoteService->getCharacteristic(CHARACTERISTIC_UUID);
+                if (pRemoteCharacteristic != nullptr) {
+                    pRemoteCharacteristic->writeValue((uint8_t*)message, length);
+                }
+            }
+        }
+    }
+}
+
+void BLEMeshService::setReceiveCallback(void (*callback)(const char* message, size_t length, int rssi)) {
     receiveCallback = callback;
 }
 
+void BLEMeshService::onConnect(BLEServer* pServer) {
+    Serial.println("Device connected");
+}
+
+void BLEMeshService::onDisconnect(BLEServer* pServer) {
+    Serial.println("Device disconnected");
+    BLEDevice::startAdvertising();
+}
+
+void BLEMeshService::onConnect(BLEClient* pClient) {
+    Serial.println("Connected to server");
+}
+
+void BLEMeshService::onDisconnect(BLEClient* pClient) {
+    Serial.println("Disconnected from server");
+    clients.erase(std::remove(clients.begin(), clients.end(), pClient), clients.end());
+}
+
+bool BLEMeshService::isClientConnected(BLEAddress address) {
+    for (auto client : clients) {
+        if (client->getPeerAddress().equals(address)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void BLEMeshService::addClient(BLEClient* client) {
+    clients.push_back(client);
+}
+
+
+// =================================================================
+// Main Application Logic
+// =================================================================
 
 BLEMeshService meshService;
 unsigned long lastStatusReport = 0;
 int forwardedMessages = 0;
 int lastRssi = 0;
 
-void handleSerialCommand(const std::string& command);
+void handleSerialCommand(String command);
 
-void receivedCallback(const std::string& msg, int rssi) {
-  Serial.printf("Received packet of size %d (RSSI: %d)\n", msg.length(), rssi);
-  meshService.sendBroadcast(msg);
+void receivedCallback(const char* msg, size_t length, int rssi) {
+  Serial.printf("Received packet of size %d (RSSI: %d)\n", length, rssi);
+  meshService.sendBroadcast(msg, length);
   forwardedMessages++;
   lastRssi = rssi;
 }
@@ -130,7 +243,7 @@ void loop() {
 
   if (Serial.available()) {
     String command = Serial.readStringUntil('\n');
-    handleSerialCommand(command.c_str());
+    handleSerialCommand(command);
   }
 
   if (millis() - lastStatusReport > 30000) {
@@ -139,7 +252,7 @@ void loop() {
   }
 }
 
-void handleSerialCommand(const std::string& command) {
+void handleSerialCommand(String command) {
   if (command == "help") {
     Serial.println("Available commands:");
     Serial.println("  help - Show this help message");
